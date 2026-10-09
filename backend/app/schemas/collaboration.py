@@ -35,11 +35,18 @@ class CommentUpdateRequest(BaseModel):
         return value
 
 
+class CommentAuthorResponse(BaseModel):
+    id: UUID
+    full_name: str
+    avatar_url: str | None = None
+
+
 class CommentResponse(BaseModel):
     id: UUID
     meeting_id: UUID
     segment_logical_id: UUID | None
     author_id: UUID
+    author: CommentAuthorResponse
     body: str
     created_at: datetime
     updated_at: datetime

@@ -157,6 +157,11 @@ def test_exports_all_formats_and_collaboration_permissions(tmp_path: Path) -> No
             json={"body": "Có ghi chú"},
         )
         assert comment.status_code == 201
+        assert comment.json()["author"] == {
+            "id": commenter["user"]["id"],
+            "full_name": "comment@example.com",
+            "avatar_url": None,
+        }
         emailed = client.post(
             f"/api/v1/meetings/{meeting_id}/members",
             headers=owner_headers,
@@ -173,10 +178,12 @@ def test_exports_all_formats_and_collaboration_permissions(tmp_path: Path) -> No
             "Họp-Việt-Nam-noi-dung.txt"
         ]
         assert "Xin chào Việt Nam" in sender.invitations[-1][1][0].content.decode("utf-8")
-        assert len(client.get(
+        listed_comments = client.get(
             f"/api/v1/meetings/{meeting_id}/comments?limit=1&offset=0",
             headers=commenter_headers,
-        ).json()) == 1
+        ).json()
+        assert len(listed_comments) == 1
+        assert listed_comments[0]["author"]["full_name"] == "comment@example.com"
         segment_id = client.get(
             f"/api/v1/meetings/{meeting_id}/transcript", headers=owner_headers
         ).json()["segments"][0]["logical_segment_id"]

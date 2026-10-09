@@ -861,6 +861,12 @@ a.meeting-row:hover { background: var(--surface-hover); }
 .segment:last-child { border-bottom: 0; }
 .segment:hover { background: var(--surface-hover); }
 .segment.is-playing { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.segment.is-merge-selected {
+  position: relative;
+  background: color-mix(in srgb, var(--accent-soft) 82%, var(--surface));
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+.segment.is-merge-selected:hover { background: var(--accent-soft); }
 .segment-meta strong, .segment-meta small { display: block; }
 .segment-meta strong { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .segment-meta small  { margin-top: 6px; color: var(--muted); font-size: 10px; }
@@ -873,8 +879,18 @@ a.meeting-row:hover { background: var(--surface-hover); }
 .segment:hover .inline-actions, .segment:focus-within .inline-actions { opacity: 1; transform: none; }
 .inline-actions .btn { min-height: 30px; padding: 5px 10px; font-size: 11px; }
 .inline-actions .is-selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
-.merge-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 10px; background: var(--accent-soft); color: var(--accent-text); font-size: 13px; font-weight: 700; }
-.merge-toolbar > div { display: flex; gap: 7px; }
+.segment.is-merge-selected .inline-actions { opacity: 1; transform: none; }
+.merge-selected-badge { width: fit-content; display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 999px; background: var(--accent); color: white; font-size: 10px; font-weight: 800; }
+.merge-selected-badge .icon { width: 12px; height: 12px; }
+.merge-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 10px; padding: 12px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 10px; background: var(--accent-soft); color: var(--accent-text); font-size: 13px; }
+.merge-toolbar-summary { min-width: 0; display: grid; gap: 8px; }
+.merge-toolbar-summary > strong { font-weight: 800; }
+.merge-selection-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.merge-selection-list button { max-width: 210px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 7px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 7px; background: var(--surface); color: var(--secondary); cursor: pointer; }
+.merge-selection-list button b { width: 18px; height: 18px; display: grid; place-items: center; flex: none; border-radius: 5px; background: var(--accent); color: white; font-size: 10px; }
+.merge-selection-list button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.merge-selection-list button .icon { width: 12px; height: 12px; flex: none; }
+.merge-toolbar-actions { display: flex; flex: none; gap: 7px; }
 .split-text { margin-bottom: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 16px; line-height: 1.8; cursor: pointer; user-select: none; }
 .split-text span { border-radius: 3px; }
 .split-text span.second { background: var(--surface-hover); }
@@ -900,6 +916,23 @@ a.meeting-row:hover { background: var(--surface-hover); }
 .speaker span { margin-top: 4px; color: var(--muted); font-size: 11px; }
 .speaker .btn { min-height: 30px; margin: 8px 5px 0 0; padding: 5px 10px; font-size: 11px; }
 
+.comments-panel { padding: 16px !important; }
+.comment-list { display: grid; }
+.comment-card { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.comment-avatar { position: relative; width: 38px; height: 38px; display: grid; place-items: center; overflow: hidden; border-radius: 50%; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; font-weight: 800; }
+.comment-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.comment-main { min-width: 0; }
+.comment-main header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.comment-main header strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 13px; }
+.comment-main header strong small { margin-left: 6px; padding: 2px 5px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 9px; }
+.comment-main time { flex: none; color: var(--muted); font-size: 10px; }
+.comment-main > p { margin: 6px 0 0; color: var(--secondary); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.comment-actions { display: flex; gap: 5px; margin-top: 8px; opacity: 0; transition: opacity .12s; }
+.comment-card:hover .comment-actions, .comment-card:focus-within .comment-actions { opacity: 1; }
+.comment-actions .btn, .comment-editor .btn { min-height: 28px; padding: 4px 8px; font-size: 10px; }
+.comment-editor { display: grid; gap: 7px; margin-top: 8px; }
+.comment-editor textarea { min-height: 86px; }
+.comment-editor > div { display: flex; gap: 6px; }
 .comments-form { display: grid; gap: 8px; margin-top: 16px; }
 .share-email-dialog { width: min(560px, calc(100vw - 32px)); }
 .share-attachment-options { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 0; padding: 0; border: 0; }
@@ -1342,6 +1375,11 @@ a.meeting-row:hover { background: var(--surface-hover); }
   .auth-card form.register-form .form-error,
   .auth-card form.register-form .btn { grid-column: auto; }
   .share-attachment-options { grid-template-columns: 1fr; }
+  .merge-toolbar { align-items: stretch; flex-direction: column; }
+  .merge-toolbar-actions { width: 100%; }
+  .merge-toolbar-actions .btn { flex: 1; }
+  .comment-main header { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .comment-actions { opacity: 1; }
 }
 
 @media (max-width: 440px) {

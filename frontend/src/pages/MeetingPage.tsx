@@ -95,6 +95,8 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     ? [["vi", "en"], ["en", "vi"]].every(([source, target]) => translationPairs.some(([from, to]) => from === source && to === target))
     : Boolean(realtimeTarget && translationPairs.some(([source, target]) => source === meeting.data?.language_mode && target === realtimeTarget));
   const displayedSegments = transcript.data?.segments.slice().reverse() ?? [];
+  const selectedMergeSegments = transcript.data?.segments.filter((segment) => mergeIds.includes(segment.logical_segment_id)) ?? [];
+  const selectedMergePositions = new Map(selectedMergeSegments.map((segment, index) => [segment.logical_segment_id, index + 1]));
   const initialRecordingDurationMs = Math.max(
     meeting.data.duration_ms ?? 0,
     media.data?.[0]?.duration_ms ?? 0,
@@ -107,12 +109,12 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
       {editable && meeting.data.source_type === "realtime" && meeting.data.status !== "completed" && capabilities.data?.stt.streaming && <RecordingPanel meetingId={meetingId} targetLanguage={realtimeTranslationSupported ? realtimeTarget : undefined} translationVisible={showRealtimeTranslations} onTranslationVisibleChange={setShowRealtimeTranslations} onTranslation={(logicalSegmentId, translation) => setRealtimeTranslations((current) => ({ ...current, [logicalSegmentId]: translation }))} onFinal={() => void transcript.reload()} onComplete={() => { void meeting.reload(); void transcript.reload(); void media.reload(); }} hasStartedBefore={transcript.data?.segments !== undefined && transcript.data.segments.length > 0} initialElapsedMs={initialRecordingDurationMs} />}
       {media.data?.[0] && <MediaPlayer ref={player} meetingId={meetingId} mediaId={media.data[0].id} filename={media.data[0].original_filename} segments={transcript.data?.segments ?? []} onActiveSegment={setActiveSegmentId} />}
       <div className="section-title"><h2>Nội dung</h2>{transcript.data && <Status>v{transcript.data.version_no}</Status>}</div>
-      {mergeIds.length > 0 && <div className="merge-toolbar"><span>Đã chọn {mergeIds.length} đoạn liền nhau</span><div><Button onClick={() => setMergeIds([])}>Hủy</Button><Button tone="dark" disabled={mergeIds.length < 2} onClick={prepareMerge}>Gộp các đoạn</Button></div></div>}
+      {mergeIds.length > 0 && <div className="merge-toolbar"><div className="merge-toolbar-summary"><strong>Đã chọn {mergeIds.length} đoạn</strong><div className="merge-selection-list">{selectedMergeSegments.map((segment, index) => <button type="button" key={segment.logical_segment_id} onClick={() => toggleMerge(segment)} title="Bỏ chọn đoạn này"><b>{index + 1}</b><span>{segment.text}</span><Icon name="close" /></button>)}</div></div><div className="merge-toolbar-actions"><Button onClick={() => setMergeIds([])}>Bỏ chọn tất cả</Button><Button tone="dark" disabled={mergeIds.length < 2} onClick={prepareMerge}>Gộp các đoạn</Button></div></div>}
       {transcript.loading && <Loading label="Đang tải transcript…" />}{transcript.error && <TranscriptState error={transcript.error} sourceType={meeting.data.source_type} uploadHref={`/meetings/${meetingId}/upload`} />}
-      {displayedSegments.length ? <div className="transcript-list">{displayedSegments.map((segment) => <article className={`segment ${activeSegmentId === segment.logical_segment_id ? "is-playing" : ""}`} id={`segment-${segment.logical_segment_id}`} key={segment.logical_segment_id}>
+      {displayedSegments.length ? <div className="transcript-list">{displayedSegments.map((segment) => { const mergePosition = selectedMergePositions.get(segment.logical_segment_id); const mergeSelected = mergePosition !== undefined; return <article className={`segment ${activeSegmentId === segment.logical_segment_id ? "is-playing" : ""} ${mergeSelected ? "is-merge-selected" : ""}`} id={`segment-${segment.logical_segment_id}`} key={segment.logical_segment_id}>
         <div className="segment-meta"><strong>{speakers.data?.find((speaker) => speaker.id === segment.speaker_id)?.name ?? "Chưa xác định"}</strong><button className="segment-time" type="button" onClick={() => player.current?.seek(segment.start_ms)}>{formatTime(segment.start_ms)} – {formatTime(segment.end_ms)}</button>{segment.confidence !== undefined && <small>{Math.round(segment.confidence * 100)}% tin cậy</small>}</div>
-        {editing?.logical_segment_id === segment.logical_segment_id ? <div className="editor"><label>Nội dung<textarea value={draft.text} onChange={(event) => setDraft({ ...draft, text: event.target.value })} /></label><div className="segment-time-fields"><label>Bắt đầu (mm:ss)<input inputMode="numeric" placeholder="01:15" value={draft.startTime} onChange={(event) => setDraft({ ...draft, startTime: event.target.value })} /></label><label>Kết thúc (mm:ss)<input inputMode="numeric" placeholder="02:30" value={draft.endTime} onChange={(event) => setDraft({ ...draft, endTime: event.target.value })} /></label></div><label>Người nói<select value={draft.speakerId} onChange={(event) => setDraft({ ...draft, speakerId: event.target.value })}><option value="">Chưa xác định</option>{speakers.data?.map((speaker) => <option key={speaker.id} value={speaker.id}>{speaker.name}</option>)}</select></label><div className="form-actions"><Button onClick={() => setEditing(undefined)}>Hủy</Button><Button tone="dark" onClick={() => void save()}>Lưu</Button></div></div> : <div className="segment-content"><p>{segment.text}</p>{showRealtimeTranslations && realtimeTranslations[segment.logical_segment_id] && <div className="realtime-translation"><small>BẢN DỊCH · {realtimeTranslations[segment.logical_segment_id].targetLanguage.toUpperCase()}</small><p>{realtimeTranslations[segment.logical_segment_id].text}</p></div>}{editable && <div className="inline-actions"><Button onClick={() => setEditing(segment)}>Sửa</Button><Button onClick={() => setPendingSplit(segment)}>Tách</Button><Button className={mergeIds.includes(segment.logical_segment_id) ? "is-selected" : ""} onClick={() => toggleMerge(segment)}>{mergeIds.includes(segment.logical_segment_id) ? "Đã chọn" : "Chọn gộp"}</Button><Button tone="danger" onClick={() => setPendingDelete(segment)}>Xóa</Button></div>}</div>}
-      </article>)}</div> : null}
+        {editing?.logical_segment_id === segment.logical_segment_id ? <div className="editor"><label>Nội dung<textarea value={draft.text} onChange={(event) => setDraft({ ...draft, text: event.target.value })} /></label><div className="segment-time-fields"><label>Bắt đầu (mm:ss)<input inputMode="numeric" placeholder="01:15" value={draft.startTime} onChange={(event) => setDraft({ ...draft, startTime: event.target.value })} /></label><label>Kết thúc (mm:ss)<input inputMode="numeric" placeholder="02:30" value={draft.endTime} onChange={(event) => setDraft({ ...draft, endTime: event.target.value })} /></label></div><label>Người nói<select value={draft.speakerId} onChange={(event) => setDraft({ ...draft, speakerId: event.target.value })}><option value="">Chưa xác định</option>{speakers.data?.map((speaker) => <option key={speaker.id} value={speaker.id}>{speaker.name}</option>)}</select></label><div className="form-actions"><Button onClick={() => setEditing(undefined)}>Hủy</Button><Button tone="dark" onClick={() => void save()}>Lưu</Button></div></div> : <div className="segment-content">{mergeSelected && <span className="merge-selected-badge"><Icon name="check" />Đoạn gộp số {mergePosition}</span>}<p>{segment.text}</p>{showRealtimeTranslations && realtimeTranslations[segment.logical_segment_id] && <div className="realtime-translation"><small>BẢN DỊCH · {realtimeTranslations[segment.logical_segment_id].targetLanguage.toUpperCase()}</small><p>{realtimeTranslations[segment.logical_segment_id].text}</p></div>}{editable && <div className="inline-actions"><Button onClick={() => setEditing(segment)}>Sửa</Button><Button onClick={() => setPendingSplit(segment)}>Tách</Button><Button className={mergeSelected ? "is-selected" : ""} onClick={() => toggleMerge(segment)}>{mergeSelected ? `Bỏ chọn #${mergePosition}` : "Chọn gộp"}</Button><Button tone="danger" onClick={() => setPendingDelete(segment)}>Xóa</Button></div>}</div>}
+      </article>; })}</div> : null}
     </section><MeetingSidePanel activeTab={activeTab} setActiveTab={setActiveTab} meeting={meeting.data} segmentCount={transcript.data?.segments.length ?? 0} speakerCount={speakers.data?.length ?? 0} meetingId={meetingId} canComment={can(meeting.data.permission, "comment")} owner={owner} currentUserId={user?.id} comments={comments} versions={versions} /></div>
     {renameOpen && <RenameMeetingDialog title={meeting.data.title} close={() => setRenameOpen(false)} confirm={async (title) => { const updated = await meetingsApi.update(meetingId, { title }); meeting.setData(updated); setRenameOpen(false); setNotice("Đã đổi tên bản ghi."); }} />}{shareOpen && <ShareDialog meetingId={meetingId} close={() => setShareOpen(false)} />}{pendingSplit && <SplitDialog segment={pendingSplit} close={() => setPendingSplit(undefined)} confirm={(splitAt, first, second) => { const segment = pendingSplit; setPendingSplit(undefined); void mutate(() => meetingsApi.splitSegment(segment.logical_segment_id, splitAt, first, second), "Đã tách đoạn và tạo phiên bản mới."); }} />}{pendingMerge && <ConfirmDialog title={`Gộp ${pendingMerge.length} đoạn?`} detail="Các đoạn đã chọn sẽ được nối theo đúng thứ tự thời gian thành một đoạn." confirmLabel="Gộp đoạn" close={() => setPendingMerge(undefined)} confirm={() => { const selected = pendingMerge; setPendingMerge(undefined); setMergeIds([]); void mutate(() => meetingsApi.mergeSegments(selected.map((segment) => segment.logical_segment_id)), `Đã gộp ${selected.length} đoạn và tạo phiên bản mới.`); }} />}{pendingDelete && <ConfirmDialog title="Xóa đoạn transcript?" detail="Đoạn đã xóa sẽ không còn trong phiên bản transcript hiện hành." confirmLabel="Xóa đoạn" close={() => setPendingDelete(undefined)} confirm={() => { const segment = pendingDelete; setPendingDelete(undefined); void mutate(() => meetingsApi.deleteSegment(segment.logical_segment_id), "Đã xóa đoạn và tạo phiên bản mới.", segment.logical_segment_id); }} />}
   </>;
@@ -223,7 +225,77 @@ function ShareDialog({ meetingId, close }: { meetingId: string; close: () => voi
     <Button type="submit" tone="dark" disabled={sending || !email.trim()}>{sending ? "Đang chuẩn bị và gửi…" : "Gửi email"}</Button>
   </form></div>;
 }
-function CommentsPanel({ meetingId, canComment, owner, currentUserId, comments }: { meetingId: string; canComment: boolean; owner: boolean; currentUserId?: string; comments: { data?: Comment[]; setData: React.Dispatch<React.SetStateAction<Comment[] | undefined>>; loading: boolean; error?: Error; reload: () => Promise<void> } }) { const [body, setBody] = useState(""); const [editing, setEditing] = useState<Comment>(); const [error, setError] = useState(""); const [submitting, setSubmitting] = useState(false); async function submit(event: React.FormEvent) { event.preventDefault(); const text = body.trim(); if (!text) return; try { setSubmitting(true); const comment = await meetingsApi.addComment(meetingId, text); comments.setData((items) => [...(items ?? []), comment]); setBody(""); setError(""); } catch (cause) { setError(meetingErrorMessage(cause)); } finally { setSubmitting(false); } } async function update() { if (!editing) return; const text = editing.body.trim(); if (!text) return setError("Bình luận không được để trống."); try { const comment = await meetingsApi.updateComment(editing.id, text); comments.setData((items) => items?.map((item) => item.id === comment.id ? comment : item)); setEditing(undefined); setError(""); } catch (cause) { setError(meetingErrorMessage(cause)); } } async function remove(id: string) { try { await meetingsApi.deleteComment(id); comments.setData((items) => items?.filter((item) => item.id !== id)); setError(""); } catch (cause) { setError(meetingErrorMessage(cause)); } } return <section className="panel"><h2>Bình luận</h2>{comments.loading && <Loading label="Đang tải bình luận…" />}{comments.error && <Failure error={comments.error} retry={comments.reload} />}{!comments.loading && !comments.error && !comments.data?.length && <p className="muted">Chưa có bình luận.</p>}{comments.data?.map((comment) => { const own = comment.author_id === currentUserId; return <div className="speaker" key={comment.id}>{editing?.id === comment.id ? <><textarea aria-label="Sửa bình luận" value={editing.body} onChange={(event) => setEditing({ ...editing, body: event.target.value })} /><Button onClick={() => void update()}>Lưu</Button><Button onClick={() => setEditing(undefined)}>Hủy</Button></> : <><strong>{comment.body}</strong><span>{new Date(comment.created_at).toLocaleString("vi-VN")}</span>{own && <Button onClick={() => setEditing(comment)}>Sửa</Button>}{(own || owner) && <Button tone="danger" onClick={() => void remove(comment.id)}>Xóa</Button>}</>}</div>; })}{canComment ? <form className="comments-form" onSubmit={submit}><textarea aria-label="Bình luận" placeholder="Viết bình luận…" value={body} required onChange={(event) => setBody(event.target.value)} /><Button type="submit" tone="dark" disabled={submitting || !body.trim()}>{submitting ? "Đang gửi…" : "Gửi bình luận"}</Button>{error && <div className="form-error">{error}</div>}</form> : <p>Bạn chỉ có quyền xem bình luận.</p>}</section>; }
+function CommentsPanel({ meetingId, canComment, owner, currentUserId, comments }: { meetingId: string; canComment: boolean; owner: boolean; currentUserId?: string; comments: { data?: Comment[]; setData: React.Dispatch<React.SetStateAction<Comment[] | undefined>>; loading: boolean; error?: Error; reload: () => Promise<void> } }) {
+  const [body, setBody] = useState("");
+  const [editing, setEditing] = useState<Comment>();
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const text = body.trim();
+    if (!text) return;
+    try {
+      setSubmitting(true);
+      const comment = await meetingsApi.addComment(meetingId, text);
+      comments.setData((items) => [...(items ?? []), comment]);
+      setBody("");
+      setError("");
+    } catch (cause) {
+      setError(meetingErrorMessage(cause));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function update() {
+    if (!editing) return;
+    const text = editing.body.trim();
+    if (!text) return setError("Bình luận không được để trống.");
+    try {
+      const comment = await meetingsApi.updateComment(editing.id, text);
+      comments.setData((items) => items?.map((item) => item.id === comment.id ? comment : item));
+      setEditing(undefined);
+      setError("");
+    } catch (cause) {
+      setError(meetingErrorMessage(cause));
+    }
+  }
+
+  async function remove(id: string) {
+    try {
+      await meetingsApi.deleteComment(id);
+      comments.setData((items) => items?.filter((item) => item.id !== id));
+      setError("");
+    } catch (cause) {
+      setError(meetingErrorMessage(cause));
+    }
+  }
+
+  return <section className="panel comments-panel">
+    <h2>Bình luận</h2>
+    {comments.loading && <Loading label="Đang tải bình luận…" />}
+    {comments.error && <Failure error={comments.error} retry={comments.reload} />}
+    {!comments.loading && !comments.error && !comments.data?.length && <p className="muted">Chưa có bình luận.</p>}
+    <div className="comment-list">{comments.data?.map((comment) => {
+      const own = comment.author_id === currentUserId;
+      const authorName = comment.author?.full_name || (own ? "Bạn" : "Người dùng");
+      const initials = authorName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase();
+      const edited = new Date(comment.updated_at).getTime() - new Date(comment.created_at).getTime() > 1000;
+      return <article className="comment-card" key={comment.id}>
+        <div className="comment-avatar" aria-hidden="true">
+          <span>{initials || "?"}</span>
+          {comment.author?.avatar_url && <img src={comment.author.avatar_url} alt="" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true; }} />}
+        </div>
+        <div className="comment-main">
+          <header><strong>{authorName}{own && <small>Bạn</small>}</strong><time dateTime={comment.created_at}>{new Date(comment.created_at).toLocaleString("vi-VN")}{edited ? " · đã sửa" : ""}</time></header>
+          {editing?.id === comment.id ? <div className="comment-editor"><textarea aria-label="Sửa bình luận" value={editing.body} onChange={(event) => setEditing({ ...editing, body: event.target.value })} /><div><Button tone="dark" onClick={() => void update()}>Lưu</Button><Button onClick={() => setEditing(undefined)}>Hủy</Button></div></div> : <><p>{comment.body}</p><div className="comment-actions">{own && <Button onClick={() => setEditing(comment)}>Sửa</Button>}{(own || owner) && <Button tone="danger" onClick={() => void remove(comment.id)}>Xóa</Button>}</div></>}
+        </div>
+      </article>;
+    })}</div>
+    {canComment ? <form className="comments-form" onSubmit={submit}><textarea aria-label="Bình luận" placeholder="Viết bình luận…" value={body} required onChange={(event) => setBody(event.target.value)} /><Button type="submit" tone="dark" disabled={submitting || !body.trim()}>{submitting ? "Đang gửi…" : "Gửi bình luận"}</Button>{error && <div className="form-error">{error}</div>}</form> : <p>Bạn chỉ có quyền xem bình luận.</p>}
+  </section>;
+}
 function RecordingPanel({ meetingId, targetLanguage, translationVisible, onTranslationVisibleChange, onTranslation, onFinal, onComplete, hasStartedBefore, initialElapsedMs }: { meetingId: string; targetLanguage?: string; translationVisible: boolean; onTranslationVisibleChange: (visible: boolean) => void; onTranslation: (logicalSegmentId: string, translation: RealtimeTranslation) => void; onFinal: () => void; onComplete: () => void; hasStartedBefore?: boolean; initialElapsedMs: number }) {
   const { accessToken } = useAuth();
   const socket = useRef<MeetingSocket | undefined>(undefined);
