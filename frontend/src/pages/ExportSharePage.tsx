@@ -15,12 +15,15 @@ const formats: Array<{ value: ExportFormat; name: string; detail: string }> = [
 ];
 
 export function ExportSharePage({ meetingId }: { meetingId: string }) {
+  const requestedContent = new URLSearchParams(window.location.search).get("content");
   const meeting = useAsync(() => meetingsApi.get(meetingId), [meetingId]);
   const transcript = useAsync(() => meetingsApi.transcript(meetingId), [meetingId]);
+  const translations = useAsync(() => meetingsApi.translations(meetingId), [meetingId]);
   const capabilities = useAsync(capabilitiesApi.get, []);
   const jobs = useJobMonitor();
   const [format, setFormat] = useState<ExportFormat>("pdf");
-  const [options, setOptions] = useState({ include_timestamps: true, include_speakers: true, include_translation: false, include_summary: false });
+  const [contentMode, setContentMode] = useState<"transcript" | "translation" | "bilingual">(requestedContent === "translation" ? "translation" : requestedContent === "bilingual" ? "bilingual" : "transcript");
+  const [options, setOptions] = useState({ include_timestamps: true, include_speakers: true, include_summary: false });
   const [artifact, setArtifact] = useState<ExportArtifact>();
   const [permission, setPermission] = useState<Exclude<Permission, "owner">>("read");
   const [shareUrl, setShareUrl] = useState("");
@@ -37,13 +40,16 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
   const currentMeeting = meeting.data;
   const owner = currentMeeting.permission === "owner";
   const hasTranscript = Boolean(transcript.data?.segments.length);
+  const hasTranslation = Boolean(translations.data?.[0]?.segments.length);
+  const translationRequired = contentMode !== "transcript";
   const jobActive = ["queued", "processing", "retrying"].includes(jobs.job?.status ?? "");
 
   async function createExport() {
     if (!hasTranscript) return setError("Cần có nội dung bản ghi trước khi xuất tệp.");
     try {
       setError(""); setNotice("");
-      const next = await meetingsApi.export(meetingId, format, options);
+      if (translationRequired && !hasTranslation) return setError("Cuộc họp chưa có bản dịch. Hãy tạo bản dịch trước khi xuất.");
+      const next = await meetingsApi.export(meetingId, format, { ...options, include_translation: translationRequired, content_mode: contentMode });
       setArtifact(next);
       if (next.job_id) jobs.track({ id: next.job_id, status: next.status });
     } catch (cause) { setError((cause as Error).message); }
@@ -87,10 +93,12 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
       <Panel>
         <h2>Xuất tệp</h2>
         <p className="muted">Chọn định dạng và phần dữ liệu cần đưa vào tệp.</p>
+        <label className="field export-content-mode">Nội dung<select value={contentMode} onChange={(event) => setContentMode(event.target.value as typeof contentMode)}><option value="transcript">Nội dung bóc băng</option><option value="translation">Chỉ bản dịch</option><option value="bilingual">Bản gốc và bản dịch</option></select></label>
+        {translationRequired && !translations.loading && !hasTranslation && <div className="form-error">Chưa có bản dịch. <a href={`/meetings/${meetingId}/translation`}>Tạo bản dịch trước</a>.</div>}
         <div className="export-formats">{formats.filter((item) => capabilities.data?.exports.includes(item.value)).map((item) => <button type="button" className={`export-format ${format === item.value ? "selected" : ""}`} onClick={() => setFormat(item.value)} key={item.value}><strong>{item.name}</strong><span>{item.detail}</span></button>)}</div>
         <div className="export-options">{Object.entries(options).map(([key, checked]) => <label key={key}><input type="checkbox" checked={checked} onChange={(event) => setOptions({ ...options, [key]: event.target.checked })} />{optionLabel(key)}</label>)}</div>
         {!transcript.loading && !hasTranscript && <p>Cần có nội dung bản ghi trước khi xuất tệp.</p>}
-        <Button tone="dark" disabled={transcript.loading || !hasTranscript || jobActive || !capabilities.data?.exports.includes(format)} onClick={() => void createExport()}>{jobActive ? "Đang tạo tệp…" : `Tạo ${format.toUpperCase()}`}</Button>
+        <Button tone="dark" disabled={transcript.loading || translations.loading || !hasTranscript || (translationRequired && !hasTranslation) || jobActive || !capabilities.data?.exports.includes(format)} onClick={() => void createExport()}>{jobActive ? "Đang tạo tệp…" : `Tạo ${format.toUpperCase()}`}</Button>
         {jobs.job && <div className={`job-state ${jobs.job.status}`}>{statusLabel(jobs.job.status)}{jobs.job.progress !== undefined ? ` · ${jobs.job.progress}%` : ""}{jobs.job.error ? ` · ${jobs.job.error.message}` : ""}</div>}
         {artifact?.status === "completed" && <Button onClick={() => void download()}>Tải {artifact.filename ?? artifact.format.toUpperCase()}</Button>}
       </Panel>

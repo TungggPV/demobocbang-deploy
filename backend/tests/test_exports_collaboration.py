@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from threading import Thread
 from uuid import UUID, uuid4
@@ -13,15 +14,28 @@ from app.main import create_app
 from app.models.enums import MeetingPermission, MeetingSourceType, TranscriptVersionSource
 from app.models.meeting import Meeting, MeetingMember
 from app.models.transcript import SegmentVersion, Speaker, Transcript, TranscriptVersion
+from app.models.translation import Translation, TranslationSegment
+from app.providers.email import EmailAttachment
 from app.services.ai import AIJobDispatcher
 
 
 class Sender:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str, str]] = []
+        self.invitations: list[tuple[str, list[EmailAttachment]]] = []
 
     async def send_otp(self, recipient: str, code: str, purpose: str) -> None:
         self.messages.append((recipient, code, purpose))
+
+    async def send_invitation(
+        self,
+        recipient: str,
+        meeting_title: str,
+        permission: str,
+        url: str,
+        attachments: Sequence[EmailAttachment] = (),
+    ) -> None:
+        self.invitations.append((recipient, list(attachments)))
 
 
 def test_exports_all_formats_and_collaboration_permissions(tmp_path: Path) -> None:
@@ -104,6 +118,23 @@ def test_exports_all_formats_and_collaboration_permissions(tmp_path: Path) -> No
             assert download.status_code == 200
             if format in {"txt", "json", "srt", "vtt"}:
                 assert "Xin chào Việt Nam" in download.content.decode("utf-8")
+        translated_export = client.post(
+            f"/api/v1/meetings/{meeting_id}/exports",
+            headers=owner_headers,
+            json={
+                "format": "txt",
+                "options": {"content_mode": "translation"},
+            },
+        )
+        assert translated_export.status_code == 202
+        translated = _wait_export(client, owner_headers, translated_export.json()["id"])
+        translated_file = client.get(
+            f"/api/v1/exports/{translated['id']}/download", headers=owner_headers
+        )
+        translated_text = translated_file.content.decode("utf-8")
+        assert "BẢN DỊCH CUỘC HỌP" in translated_text
+        assert "Hello Vietnam" in translated_text
+        assert "Xin chào Việt Nam" not in translated_text
         assert (
             client.post(
                 f"/api/v1/meetings/{meeting_id}/exports",
@@ -126,6 +157,22 @@ def test_exports_all_formats_and_collaboration_permissions(tmp_path: Path) -> No
             json={"body": "Có ghi chú"},
         )
         assert comment.status_code == 201
+        emailed = client.post(
+            f"/api/v1/meetings/{meeting_id}/members",
+            headers=owner_headers,
+            json={
+                "email": "new-reader@example.com",
+                "permission": "read",
+                "attachments": ["transcript"],
+            },
+        )
+        assert emailed.status_code == 201
+        assert emailed.json()["status"] == "invitation_sent"
+        assert sender.invitations[-1][0] == "new-reader@example.com"
+        assert [item.filename for item in sender.invitations[-1][1]] == [
+            "Họp-Việt-Nam-noi-dung.txt"
+        ]
+        assert "Xin chào Việt Nam" in sender.invitations[-1][1][0].content.decode("utf-8")
         assert len(client.get(
             f"/api/v1/meetings/{meeting_id}/comments?limit=1&offset=0",
             headers=commenter_headers,
@@ -203,15 +250,32 @@ def _seed(url: str, owner_id: UUID, commenter_id: UUID, reader_id: UUID) -> str:
             speaker = Speaker(meeting_id=meeting.id, name="Người nói 1")
             session.add(speaker)
             await session.flush()
+            logical_segment_id = uuid4()
             session.add(
                 SegmentVersion(
                     transcript_version_id=version.id,
-                    logical_segment_id=uuid4(),
+                    logical_segment_id=logical_segment_id,
                     speaker_id=speaker.id,
                     sequence=1,
                     start_ms=0,
                     end_ms=1250,
                     text="Xin chào Việt Nam",
+                )
+            )
+            translation = Translation(
+                meeting_id=meeting.id,
+                transcript_version_id=version.id,
+                source_language="vi",
+                target_language="en",
+            )
+            session.add(translation)
+            await session.flush()
+            session.add(
+                TranslationSegment(
+                    translation_id=translation.id,
+                    logical_segment_id=logical_segment_id,
+                    sequence=1,
+                    text="Hello Vietnam",
                 )
             )
             meeting.current_transcript_version_id = version.id

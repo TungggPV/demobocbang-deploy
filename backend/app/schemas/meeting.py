@@ -85,11 +85,14 @@ class MeetingResponse(BaseModel):
 
 
 class MeetingMemberCreateRequest(BaseModel):
-    """Invite an already registered user by either stable id or email."""
+    """Invite a user and optionally email selected meeting files."""
 
     user_id: UUID | None = None
     email: str | None = Field(default=None, min_length=3, max_length=320)
     permission: MeetingPermission
+    attachments: list[Literal["audio", "transcript", "summary", "translation"]] = Field(
+        default_factory=list, max_length=4
+    )
 
     @field_validator("email")
     @classmethod
@@ -102,6 +105,15 @@ class MeetingMemberCreateRequest(BaseModel):
             raise ValueError("Provide exactly one of user_id or email.")
         return self
 
+    @field_validator("attachments")
+    @classmethod
+    def require_unique_attachments(
+        cls, value: list[Literal["audio", "transcript", "summary", "translation"]]
+    ) -> list[Literal["audio", "transcript", "summary", "translation"]]:
+        if len(value) != len(set(value)):
+            raise ValueError("Each attachment can only be selected once.")
+        return value
+
 
 class MeetingMemberUpdateRequest(BaseModel):
     permission: MeetingPermission
@@ -112,6 +124,14 @@ class MeetingMemberResponse(BaseModel):
     permission: AccessLevel
     created_at: datetime
     user: UserResponse
+
+
+class MeetingEmailInvitationResponse(BaseModel):
+    """Result returned when an invitation is emailed before account creation."""
+
+    email: str
+    permission: MeetingPermission
+    status: Literal["invitation_sent"] = "invitation_sent"
 
 
 class ShareLinkCreateRequest(BaseModel):

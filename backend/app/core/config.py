@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     email_smtp_username: str | None = None
     email_smtp_password: str | None = None
     email_smtp_use_tls: bool = True
+    email_attachment_max_bytes: int = 15_000_000
     google_client_id: str | None = None
     google_client_secret: str | None = None
     google_redirect_uri: str | None = None

@@ -16,6 +16,7 @@ from app.models.meeting import Meeting, MeetingMember, ShareLink
 from app.models.transcript import CurrentSegment, Transcript
 from app.models.user import User
 from app.providers.email import EmailSender
+from app.providers.storage import MediaStorage
 from app.schemas.auth import UserResponse
 from app.schemas.meeting import (
     AccessLevel,
@@ -28,6 +29,7 @@ from app.schemas.meeting import (
     ShareLinkResponse,
     ShareLinkUpdateRequest,
 )
+from app.services.email_shares import build_meeting_email_attachments
 
 _PERMISSION_RANK = {
     MeetingPermission.READ: 1,
@@ -176,10 +178,61 @@ class MeetingService:
 
     async def add_member(
         self, meeting_id: UUID, actor: User, payload: MeetingMemberCreateRequest,
-        email_sender: EmailSender | None = None, invitation_url: str | None = None,
+        email_sender: EmailSender | None = None, frontend_url: str | None = None,
+        storage: MediaStorage | None = None, max_attachment_bytes: int = 15_000_000,
     ) -> dict[str, object]:
         meeting, _ = await self.require_access(meeting_id, actor, "owner")
-        target = await self._member_target(payload)
+        if payload.attachments and storage is None:
+            raise ApiError(
+                "EMAIL_ATTACHMENT_UNAVAILABLE",
+                "Không thể chuẩn bị tệp đính kèm lúc này.",
+                503,
+            )
+        attachments = (
+            await build_meeting_email_attachments(
+                self._session,
+                storage,
+                meeting,
+                payload.attachments,
+                max_attachment_bytes,
+            )
+            if payload.attachments and storage is not None
+            else []
+        )
+        target = await self._member_target(payload, required=payload.user_id is not None)
+        if target is None:
+            if payload.email is None or email_sender is None or frontend_url is None:
+                raise ApiError(
+                    "INVITATION_UNAVAILABLE",
+                    "Không thể gửi lời mời qua email lúc này.",
+                    503,
+                )
+            token = secrets.token_urlsafe(32)
+            self._session.add(
+                ShareLink(
+                    meeting_id=meeting.id,
+                    created_by=actor.id,
+                    token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                    permission=payload.permission,
+                )
+            )
+            try:
+                await email_sender.send_invitation(
+                    payload.email,
+                    meeting.title,
+                    payload.permission.value,
+                    f"{frontend_url.rstrip('/')}/share/{token}",
+                    attachments,
+                )
+                await self._session.commit()
+            except Exception:
+                await self._session.rollback()
+                raise
+            return {
+                "email": payload.email,
+                "permission": payload.permission,
+                "status": "invitation_sent",
+            }
         if target.id == meeting.owner_id:
             raise ApiError(
                 "OWNER_CANNOT_BE_MEMBER", "The meeting owner is not a collaborator.", 400
@@ -194,9 +247,13 @@ class MeetingService:
             member = existing
             member.permission = payload.permission
         await self._session.flush()
-        if email_sender is not None and invitation_url is not None:
+        if email_sender is not None and frontend_url is not None:
             await email_sender.send_invitation(
-                target.email, meeting.title, payload.permission.value, invitation_url
+                target.email,
+                meeting.title,
+                payload.permission.value,
+                f"{frontend_url.rstrip('/')}/meetings/{meeting_id}",
+                attachments,
             )
         await self._session.commit()
         await self._session.refresh(member)
@@ -306,13 +363,15 @@ class MeetingService:
         await self._session.refresh(meeting)
         return self._meeting_response(meeting, member.permission)
 
-    async def _member_target(self, payload: MeetingMemberCreateRequest) -> User:
+    async def _member_target(
+        self, payload: MeetingMemberCreateRequest, *, required: bool = True
+    ) -> User | None:
         target = (
             await self._session.get(User, payload.user_id)
             if payload.user_id is not None
             else await self._session.scalar(select(User).where(User.email == payload.email))
         )
-        if target is None:
+        if target is None and required:
             raise ApiError("USER_NOT_FOUND", "No user exists for this invitation.", 404)
         return target
 

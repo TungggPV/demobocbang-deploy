@@ -20,13 +20,13 @@ function refreshAccessToken(): Promise<boolean> {
 async function request<T>(path: string, init: RequestInit = {}, retry = true, responseType: "json" | "blob" = "json"): Promise<T> {
   // Auth endpoints must not try to refresh themselves. Otherwise an expired
   // refresh token can recursively call /auth/refresh after its own 401.
-  const isAuthRequest = path.startsWith("/auth/");
-  const token = isAuthRequest ? null : getAccessToken();
+  const isPublicAuthRequest = path.startsWith("/auth/") && path !== "/auth/me";
+  const token = isPublicAuthRequest ? null : getAccessToken();
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const response = await fetch(`${config.apiBaseUrl}${path}`, { ...init, headers, credentials: "include" });
-  if (response.status === 401 && !isAuthRequest && retry && await refreshAccessToken()) return request<T>(path, init, false, responseType);
+  if (response.status === 401 && !isPublicAuthRequest && retry && await refreshAccessToken()) return request<T>(path, init, false, responseType);
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as ApiErrorShape;
     throw new ApiError(response.status, body.code, body.message ?? body.detail ?? "Không thể hoàn tất yêu cầu.");

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import smtplib
 import ssl
+from dataclasses import dataclass
 from email.message import EmailMessage
-from typing import Protocol
+from typing import Protocol, Sequence
 
 import httpx
 
@@ -14,17 +16,24 @@ from app.core.config import Settings
 from app.core.errors import ApiError
 
 
+@dataclass(frozen=True, slots=True)
+class EmailAttachment:
+    filename: str
+    content: bytes
+    content_type: str = "application/octet-stream"
+
+
 class EmailSender(Protocol):
     async def send_otp(self, recipient: str, code: str, purpose: str) -> None: ...
-    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None: ...
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str, attachments: Sequence[EmailAttachment] = ()) -> None: ...
 
 
 class UnavailableEmailSender:
     async def send_otp(self, recipient: str, code: str, purpose: str) -> None:
         raise ApiError("EMAIL_DELIVERY_UNAVAILABLE", "Email delivery is not configured.", 503)
 
-    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None:
-        raise ApiError("EMAIL_DELIVERY_UNAVAILABLE", "Email delivery is not configured.", 503)
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str, attachments: Sequence[EmailAttachment] = ()) -> None:
+        raise ApiError("EMAIL_DELIVERY_UNAVAILABLE", "Chức năng gửi email chưa được cấu hình.", 503)
 
 
 class ConsoleEmailSender:
@@ -41,8 +50,9 @@ class ConsoleEmailSender:
             flush=True,
         )
 
-    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None:
-        print(f"[DEV EMAIL INVITATION] To: {recipient} | Meeting: {meeting_title} | Permission: {permission} | URL: {url}", flush=True)
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str, attachments: Sequence[EmailAttachment] = ()) -> None:
+        names = ", ".join(item.filename for item in attachments) or "none"
+        print(f"[DEV EMAIL INVITATION] To: {recipient} | Meeting: {meeting_title} | Permission: {permission} | URL: {url} | Attachments: {names}", flush=True)
 
 
 class SmtpEmailSender:
@@ -72,7 +82,7 @@ class SmtpEmailSender:
         except OSError as exc:
             raise ApiError("EMAIL_DELIVERY_FAILED", "Unable to send email.", 502) from exc
 
-    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None:
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str, attachments: Sequence[EmailAttachment] = ()) -> None:
         message = EmailMessage()
         message["From"] = self._sender
         message["To"] = recipient
@@ -81,10 +91,18 @@ class SmtpEmailSender:
             f"Bạn được mời vào bản ghi “{meeting_title}” với quyền {permission}.\n\n"
             f"Mở bản ghi: {url}\n\nNếu bạn chưa đăng nhập, hãy dùng đúng địa chỉ email nhận thư này."
         )
+        for attachment in attachments:
+            main_type, sub_type = attachment.content_type.split("/", 1)
+            message.add_attachment(
+                attachment.content,
+                maintype=main_type,
+                subtype=sub_type,
+                filename=attachment.filename,
+            )
         try:
             await asyncio.to_thread(self._send, message)
         except OSError as exc:
-            raise ApiError("EMAIL_DELIVERY_FAILED", "Unable to send email.", 502) from exc
+            raise ApiError("EMAIL_DELIVERY_FAILED", "Không thể gửi email. Vui lòng thử lại.", 502) from exc
 
     def _send(self, message: EmailMessage) -> None:
         with smtplib.SMTP(self._host, self._port, timeout=15) as client:
@@ -146,7 +164,7 @@ class BrevoEmailSender:
         except httpx.HTTPError as exc:
             raise ApiError("EMAIL_DELIVERY_FAILED", "Unable to send email.", 502) from exc
 
-    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None:
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str, attachments: Sequence[EmailAttachment] = ()) -> None:
         labels = {"read": "chỉ xem", "comment": "xem và bình luận", "edit": "chỉnh sửa"}
         payload = {
             "sender": {"name": "Bóc Băng", "email": self._sender},
@@ -158,6 +176,14 @@ class BrevoEmailSender:
                 "Nếu bạn chưa đăng nhập, hãy dùng đúng địa chỉ email nhận thư này."
             ),
         }
+        if attachments:
+            payload["attachment"] = [
+                {
+                    "name": item.filename,
+                    "content": base64.b64encode(item.content).decode("ascii"),
+                }
+                for item in attachments
+            ]
         try:
             async with httpx.AsyncClient(timeout=15, transport=self._transport) as client:
                 response = await client.post(
@@ -167,7 +193,7 @@ class BrevoEmailSender:
                 )
                 response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise ApiError("EMAIL_DELIVERY_FAILED", "Unable to send email.", 502) from exc
+            raise ApiError("EMAIL_DELIVERY_FAILED", "Không thể gửi email. Vui lòng thử lại.", 502) from exc
 
 
 def build_email_sender(settings: Settings) -> EmailSender:

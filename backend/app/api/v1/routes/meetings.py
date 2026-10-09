@@ -15,6 +15,7 @@ from app.models.enums import MeetingSourceType, MeetingStatus
 from app.schemas.meeting import (
     MeetingCreateRequest,
     MeetingMemberCreateRequest,
+    MeetingEmailInvitationResponse,
     MeetingMemberResponse,
     MeetingMemberUpdateRequest,
     MeetingResponse,
@@ -110,7 +111,7 @@ async def list_members(
 
 @router.post(
     "/{meeting_id}/members",
-    response_model=MeetingMemberResponse,
+    response_model=MeetingMemberResponse | MeetingEmailInvitationResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def add_member(
@@ -127,7 +128,9 @@ async def add_member(
         user,
         payload,
         sender if hasattr(sender, "send_invitation") else None,
-        f"{settings.frontend_origins[0]}/meetings/{meeting_id}",
+        settings.frontend_origins[0],
+        request.app.state.media_storage,
+        settings.email_attachment_max_bytes,
     )
 
 

@@ -11,7 +11,7 @@ from app.core.config import Settings
 from app.core.errors import ApiError
 from app.db.base import Base
 from app.main import create_app
-from app.providers.email import BrevoEmailSender, UnavailableEmailSender, build_email_sender
+from app.providers.email import BrevoEmailSender, EmailAttachment, UnavailableEmailSender, build_email_sender
 
 
 class CapturingEmailSender:
@@ -85,6 +85,14 @@ def test_email_registration_verification_login_and_refresh(tmp_path: Path) -> No
         assert profile.status_code == 200
         assert profile.json()["email"] == "member@example.com"
 
+        updated_profile = client.patch(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {session['access_token']}"},
+            json={"full_name": "Tên hiển thị mới"},
+        )
+        assert updated_profile.status_code == 200
+        assert updated_profile.json()["full_name"] == "Tên hiển thị mới"
+
         refreshed = client.post(
             "/api/v1/auth/refresh", json={"refresh_token": session["refresh_token"]}
         )
@@ -147,6 +155,19 @@ def test_brevo_email_sender_uses_https_api() -> None:
     assert payload["sender"]["email"] == "sender@example.com"
     assert payload["to"] == [{"email": "member@example.com"}]
     assert "123456" in payload["textContent"]
+
+    asyncio.run(
+        sender.send_invitation(
+            "member@example.com",
+            "Họp tuần",
+            "read",
+            "https://example.com/share/token",
+            [EmailAttachment("noi-dung.txt", "Xin chào".encode(), "text/plain")],
+        )
+    )
+    invitation = json.loads(requests[-1].content)
+    assert invitation["attachment"][0]["name"] == "noi-dung.txt"
+    assert invitation["attachment"][0]["content"] == "WGluIGNow6Bv"
 
 
 def test_brevo_email_sender_maps_provider_failure_to_api_error() -> None:

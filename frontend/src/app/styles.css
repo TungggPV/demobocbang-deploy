@@ -833,9 +833,13 @@ a.meeting-row:hover { background: var(--surface-hover); }
 .player audio { width: 100%; margin-top: 14px; }
 .player-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; }
 .player-heading label { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.player-heading select { width: auto; height: 34px; margin-left: 6px; padding: 0 28px 0 10px; font-size: 13px; }
+.player-heading select { width: auto; height: 34px; padding: 0 24px 0 4px; border: 0; background-color: transparent; font-size: 13px; }
 .player-tools { display: flex; align-items: center; gap: 8px; }
-.player-tools .btn { min-height: 34px; padding: 6px 11px; font-size: 12px; }
+.player-speed, .player-icon-button { min-width: 38px; height: 36px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--secondary); }
+.player-speed { gap: 2px; padding-left: 8px; }
+.player-speed .icon, .player-icon-button .icon { width: 17px; height: 17px; flex: 0 0 auto; }
+.player-icon-button { width: 38px; text-decoration: none; transition: background .12s, border-color .12s; }
+.player-icon-button:hover { border-color: var(--border-strong); background: var(--surface-hover); }
 
 .transcript-list {
   overflow: hidden;
@@ -897,6 +901,15 @@ a.meeting-row:hover { background: var(--surface-hover); }
 .speaker .btn { min-height: 30px; margin: 8px 5px 0 0; padding: 5px 10px; font-size: 11px; }
 
 .comments-form { display: grid; gap: 8px; margin-top: 16px; }
+.share-email-dialog { width: min(560px, calc(100vw - 32px)); }
+.share-attachment-options { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 0; padding: 0; border: 0; }
+.share-attachment-options legend { margin-bottom: 8px; color: var(--text); font-size: 13px; font-weight: 700; }
+.share-attachment-options label { display: flex; align-items: flex-start; gap: 9px; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); cursor: pointer; }
+.share-attachment-options label.selected { border-color: var(--accent); background: var(--accent-soft); }
+.share-attachment-options input { width: auto; margin-top: 2px; }
+.share-attachment-options span, .share-attachment-options small { display: block; }
+.share-attachment-options strong { font-size: 13px; }
+.share-attachment-options small { margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.35; }
 .versions { display: grid; gap: 7px; }
 
 /* ═══════════════════════════════════════════
@@ -1328,6 +1341,7 @@ a.meeting-row:hover { background: var(--surface-hover); }
   .auth-card form.register-form .auth-consent,
   .auth-card form.register-form .form-error,
   .auth-card form.register-form .btn { grid-column: auto; }
+  .share-attachment-options { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 440px) {

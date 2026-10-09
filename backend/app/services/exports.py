@@ -49,6 +49,23 @@ class ExportService:
     ) -> ExportResponse:
         meeting, _ = await self._meetings.require_access(meeting_id, user, MeetingPermission.READ)
         version = await TranscriptService(self._session).ensure_current_snapshot(meeting)
+        wants_translation = (
+            payload.options.include_translation
+            or payload.options.content_mode in {"translation", "bilingual"}
+        )
+        if wants_translation:
+            translation = await self._session.scalar(
+                select(Translation)
+                .where(Translation.meeting_id == meeting.id)
+                .order_by(Translation.created_at.desc())
+                .limit(1)
+            )
+            if translation is None:
+                raise ApiError(
+                    "TRANSLATION_NOT_FOUND",
+                    "Cuộc họp chưa có bản dịch để xuất.",
+                    422,
+                )
         export = Export(
             meeting_id=meeting.id, transcript_version_id=version.id, format=payload.format
         )
@@ -175,27 +192,41 @@ class ExportJobRunner:
             "include_speakers": True,
             "include_translation": False,
             "include_summary": False,
+            "content_mode": "transcript",
             **dict(payload.get("options", {})),
         }
+        if options["include_translation"] and options["content_mode"] == "transcript":
+            options["content_mode"] = "bilingual"
         speakers = {
             item.id: item.name
             for item in await session.scalars(
                 select(Speaker).where(Speaker.meeting_id == meeting.id)
             )
         }
-        translation = (
+        wants_translation = options["content_mode"] in {"translation", "bilingual"}
+        translation, translation_is_current, translation_info = (
             await _translation_by_segment(session, meeting.id, export.transcript_version_id)
-            if options["include_translation"]
-            else {}
+            if wants_translation
+            else ({}, True, None)
         )
         summary = (
             await _latest_summary(session, meeting.id, export.transcript_version_id)
             if options["include_summary"]
             else None
         )
-        document = _document(meeting, export, segments, speakers, translation, summary, options)
+        document = _document(
+            meeting,
+            export,
+            segments,
+            speakers,
+            translation,
+            summary,
+            options,
+            translation_is_current,
+            translation_info,
+        )
         content = _render(export.format, document)
-        filename = _filename(meeting.title, export.format)
+        filename = _filename(meeting.title, export.format, str(options["content_mode"]))
         key = f"exports/meetings/{meeting.id}/{export.id}.{export.format.value}"
         # Export binaries can be large. Keep the object-storage boundary
         # streaming-friendly and avoid assuming an API/worker shared volume.
@@ -219,21 +250,26 @@ class ExportJobRunner:
 
 async def _translation_by_segment(
     session: AsyncSession, meeting_id: UUID, version_id: UUID
-) -> dict[UUID, str]:
+) -> tuple[dict[UUID, str], bool, dict[str, str] | None]:
     translation = await session.scalar(
         select(Translation)
-        .where(
-            Translation.meeting_id == meeting_id, Translation.transcript_version_id == version_id
-        )
+        .where(Translation.meeting_id == meeting_id)
         .order_by(Translation.created_at.desc())
         .limit(1)
     )
     if translation is None:
-        return {}
+        return {}, True, None
     rows = await session.scalars(
         select(TranslationSegment).where(TranslationSegment.translation_id == translation.id)
     )
-    return {row.logical_segment_id: row.text for row in rows}
+    return (
+        {row.logical_segment_id: row.text for row in rows},
+        translation.transcript_version_id == version_id,
+        {
+            "source_language": translation.source_language,
+            "target_language": translation.target_language,
+        },
+    )
 
 
 async def _latest_summary(
@@ -264,6 +300,8 @@ def _document(
     translation: dict[UUID, str],
     summary: dict[str, object] | None,
     options: dict[str, object],
+    translation_is_current: bool = True,
+    translation_info: dict[str, str] | None = None,
 ) -> dict[str, object]:
     data = {
         "meeting": {
@@ -283,6 +321,10 @@ def _document(
         "options": options,
         "segments": [],
     }
+    if translation_info is not None:
+        data["translation"] = translation_info
+    content_mode = str(options.get("content_mode", "transcript"))
+    missing_translation = False
     for item in segments:
         row: dict[str, object] = {
             "id": str(item.logical_segment_id),
@@ -292,14 +334,26 @@ def _document(
         }
         if options["include_speakers"]:
             row["speaker"] = speakers.get(item.speaker_id) if item.speaker_id else None
-        if options["include_translation"] and item.logical_segment_id in translation:
-            row["translation"] = translation[item.logical_segment_id]
+        translated = translation.get(item.logical_segment_id)
+        if content_mode == "translation":
+            row["source_text"] = item.text
+            row["text"] = translated or f"[Chưa có bản dịch] {item.text}"
+            missing_translation = missing_translation or translated is None
+        elif content_mode == "bilingual":
+            if translated is not None:
+                row["translation"] = translated
+            else:
+                missing_translation = True
         data["segments"].append(row)
     if options["include_summary"] and summary is not None:
         data["summary"] = summary
     warnings: list[str] = []
-    if options["include_translation"] and not translation:
-        warnings.append("Chưa có bản dịch phù hợp với phiên bản nội dung hiện tại.")
+    if content_mode in {"translation", "bilingual"} and not translation:
+        warnings.append("Chưa có bản dịch để đưa vào tệp.")
+    elif content_mode in {"translation", "bilingual"} and not translation_is_current:
+        warnings.append("Bản dịch được tạo từ phiên bản nội dung trước; hãy dịch lại nếu nội dung đã thay đổi.")
+    if missing_translation:
+        warnings.append("Một số đoạn mới chưa có bản dịch tương ứng.")
     if options["include_summary"] and summary is None:
         warnings.append("Chưa có tóm tắt phù hợp với phiên bản nội dung hiện tại.")
     if warnings:
@@ -338,7 +392,7 @@ def _render(format: ExportFormat, data: dict[str, object]) -> bytes:
         for label, value in _meeting_details(meeting):
             cells = table.add_row().cells
             cells[0].text, cells[1].text = label, value
-        document.add_heading("Nội dung", level=1)
+        document.add_heading(_content_heading(data["options"]), level=1)
         for index, item in enumerate(data["segments"], start=1):
             paragraph = document.add_paragraph()
             prefix = _segment_prefix(item, data["options"], index)
@@ -396,7 +450,7 @@ def _render(format: ExportFormat, data: dict[str, object]) -> bytes:
         stripped = line.strip()
         if not stripped:
             story.append(Spacer(1, 4 * mm))
-        elif stripped in {"THÔNG TIN", "NỘI DUNG", "TÓM TẮT", "LƯU Ý"}:
+        elif stripped in {"THÔNG TIN", "NỘI DUNG BÓC BĂNG", "BẢN DỊCH", "NỘI DUNG SONG NGỮ", "TÓM TẮT", "LƯU Ý"}:
             story.append(Paragraph(stripped, heading))
         else:
             story.append(Paragraph(html.escape(line).replace("  ", "&nbsp;&nbsp;"), body))
@@ -406,11 +460,16 @@ def _render(format: ExportFormat, data: dict[str, object]) -> bytes:
 
 def _plain_text(data: dict[str, object]) -> str:
     meeting = data["meeting"]
-    lines = ["BẢN GHI CUỘC HỌP", str(meeting["title"]), "", "THÔNG TIN"]
+    mode = str(data["options"].get("content_mode", "transcript"))
+    document_title = {
+        "translation": "BẢN DỊCH CUỘC HỌP",
+        "bilingual": "NỘI DUNG SONG NGỮ",
+    }.get(mode, "BẢN GHI CUỘC HỌP")
+    lines = [document_title, str(meeting["title"]), "", "THÔNG TIN"]
     lines.extend(f"{label}: {value}" for label, value in _meeting_details(meeting))
     if meeting.get("description"):
         lines.extend(["", "Mô tả", str(meeting["description"])])
-    lines.extend(["", "NỘI DUNG"])
+    lines.extend(["", _content_heading(data["options"]).upper()])
     for index, item in enumerate(data["segments"], start=1):
         lines.append(_segment_prefix(item, data["options"], index) + str(item["text"]))
         if item.get("translation"):
@@ -451,17 +510,25 @@ def _timestamp(value: object, separator: str = ".") -> str:
     return f"{hours:02}:{minutes:02}:{seconds:02}{separator}{ms:03}"
 
 
-def _filename(title: str, format: ExportFormat) -> str:
+def _filename(title: str, format: ExportFormat, content_mode: str = "transcript") -> str:
     stem = re.sub(r"[^\w.-]+", "-", title, flags=re.UNICODE).strip(".-") or "meeting"
-    return f"{stem}.{format.value}"
+    suffix = {"translation": "-ban-dich", "bilingual": "-song-ngu"}.get(content_mode, "")
+    return f"{stem}{suffix}.{format.value}"
 
 
 def _meeting_details(meeting: dict[str, object]) -> list[tuple[str, str]]:
     language = {"vi": "Tiếng Việt", "en": "Tiếng Anh", "auto": "Tự động nhận diện"}.get(str(meeting["language_mode"]), str(meeting["language_mode"]))
     created = str(meeting["created_at"]).replace("T", " ").replace("+00:00", " UTC")
-    status = {"created": "Đã tạo", "recording": "Đang ghi âm", "processing": "Đang xử lý", "completed": "Hoàn tất", "failed": "Thất bại"}.get(str(meeting.get("status")), str(meeting.get("status", "")))
+    status = {"created": "Chưa bắt đầu", "recording": "Đang ghi âm", "processing": "Đang xử lý", "completed": "Hoàn tất", "failed": "Thất bại"}.get(str(meeting.get("status")), str(meeting.get("status", "")))
     source = {"realtime": "Ghi âm trực tiếp", "upload": "Tệp tải lên"}.get(str(meeting.get("source_type")), str(meeting.get("source_type", "")))
     return [("Trạng thái", status), ("Nguồn", source), ("Ngôn ngữ", language), ("Ngày tạo", created), ("Phiên bản nội dung", str(meeting["transcript_version_id"]))]
+
+
+def _content_heading(options: dict[str, object]) -> str:
+    return {
+        "translation": "Bản dịch",
+        "bilingual": "Nội dung song ngữ",
+    }.get(str(options.get("content_mode", "transcript")), "Nội dung bóc băng")
 
 
 def _segment_prefix(item: dict[str, object], options: dict[str, object], index: int) -> str:

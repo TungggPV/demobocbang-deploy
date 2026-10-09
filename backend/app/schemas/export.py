@@ -1,6 +1,7 @@
 """Export request and response contracts."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -13,6 +14,7 @@ class ExportOptions(BaseModel):
     include_speakers: bool = True
     include_translation: bool = False
     include_summary: bool = False
+    content_mode: Literal["transcript", "translation", "bilingual"] = "transcript"
 
 
 class ExportCreateRequest(BaseModel):

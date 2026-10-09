@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Sequence
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -7,20 +8,22 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.core.config import Settings
 from app.db.base import Base
 from app.main import create_app
+from app.providers.email import EmailAttachment
 
 
 class CapturingEmailSender:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str, str]] = []
-        self.invitations: list[tuple[str, str, str, str]] = []
+        self.invitations: list[tuple[str, str, str, str, list[EmailAttachment]]] = []
 
     async def send_otp(self, recipient: str, code: str, purpose: str) -> None:
         self.messages.append((recipient, code, purpose))
 
     async def send_invitation(
-        self, recipient: str, meeting_title: str, permission: str, url: str
+        self, recipient: str, meeting_title: str, permission: str, url: str,
+        attachments: Sequence[EmailAttachment] = (),
     ) -> None:
-        self.invitations.append((recipient, meeting_title, permission, url))
+        self.invitations.append((recipient, meeting_title, permission, url, list(attachments)))
 
 
 def test_meeting_crud_and_collaborator_acl(tmp_path: Path) -> None:
@@ -88,7 +91,24 @@ def test_meeting_crud_and_collaborator_acl(tmp_path: Path) -> None:
             "Sprint planning",
             "edit",
             f"http://localhost:5173/meetings/{meeting_id}",
+            [],
         )
+
+        pending_invitation = client.post(
+            f"/api/v1/meetings/{meeting_id}/members",
+            headers=owner_headers,
+            json={"email": "new-member@example.com", "permission": "comment"},
+        )
+        assert pending_invitation.status_code == 201
+        assert pending_invitation.json() == {
+            "email": "new-member@example.com",
+            "permission": "comment",
+            "status": "invitation_sent",
+        }
+        invitation_url = sender.invitations[-1][3]
+        assert invitation_url.startswith("http://localhost:5173/share/")
+        token = invitation_url.rsplit("/", 1)[-1]
+        assert client.get(f"/api/v1/shares/{token}").status_code == 200
 
         listed_for_member = client.get("/api/v1/meetings", headers=member_headers)
         assert listed_for_member.status_code == 200

@@ -6,7 +6,7 @@ import { Button, Empty, Failure, Icon, Loading, PageHeading, Status, statusLabel
 
 const statuses: Array<{ value: "" | MeetingStatus; label: string }> = [
   { value: "", label: "Tất cả trạng thái" },
-  { value: "created", label: "Đã tạo" },
+  { value: "created", label: "Chưa bắt đầu" },
   { value: "recording", label: "Đang ghi âm" },
   { value: "processing", label: "Đang xử lý" },
   { value: "completed", label: "Hoàn tất" },
@@ -24,6 +24,7 @@ function MeetingsOverview() {
   const [source, setSource] = useState<"" | Meeting["source_type"]>("");
   const [mediaMeeting, setMediaMeeting] = useState<Meeting>();
   const [pendingDelete, setPendingDelete] = useState<Meeting>();
+  const statusInventory = useAsync(() => meetingsApi.list({ limit: 250 }), []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(query.trim()), 300);
@@ -35,6 +36,9 @@ function MeetingsOverview() {
     [search, status, source],
   );
   const filtering = Boolean(query || status || source);
+  const visibleStatuses = statuses.filter(
+    (item) => !item.value || statusInventory.data?.some((meeting) => meeting.status === item.value),
+  );
 
   async function deleteMeeting() {
     if (!pendingDelete) return;
@@ -59,7 +63,7 @@ function MeetingsOverview() {
     />
     <div className="history-tools meeting-tools">
       <label><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm cuộc họp..." /></label>
-      <select aria-label="Lọc trạng thái" value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>{statuses.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
+      <select aria-label="Lọc trạng thái" value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>{visibleStatuses.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
       <select aria-label="Lọc nguồn âm thanh" value={source} onChange={(event) => setSource(event.target.value as typeof source)}><option value="">Tất cả nguồn</option><option value="realtime">Ghi âm</option><option value="upload">Tải tệp</option></select>
     </div>
     {meetings.loading && <Loading />}

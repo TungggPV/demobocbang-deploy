@@ -41,6 +41,8 @@ envVarGroups:
         sync: false
       - key: EMAIL_FROM
         sync: false
+      - key: EMAIL_ATTACHMENT_MAX_BYTES
+        value: "15000000"
       - key: STORAGE_BACKEND
         value: s3
       - key: S3_ENDPOINT_URL
