@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.api.v1.routes.auth import CurrentUserDependency
 from app.api.v1.routes.meetings import MeetingServiceDependency
@@ -15,6 +15,7 @@ from app.schemas.collaboration import (
     ShareAccessResponse,
     ShareTranscriptResponse,
 )
+from app.schemas.meeting import MeetingResponse
 from app.services.collaboration import CollaborationService
 
 meetings_router = APIRouter(prefix="/meetings")
@@ -79,3 +80,10 @@ async def resolve_share(token: str, service: MeetingServiceDependency) -> ShareA
 @shares_router.get("/{token}/transcript", response_model=ShareTranscriptResponse)
 async def shared_transcript(token: str, service: CollaborationServiceDependency) -> ShareTranscriptResponse:
     return await service.shared_transcript(token)
+
+
+@shares_router.post("/{token}/redeem", response_model=MeetingResponse)
+async def redeem_share(
+    token: str, user: CurrentUserDependency, service: MeetingServiceDependency
+) -> MeetingResponse:
+    return await service.redeem_share(token, user)

@@ -30,6 +30,8 @@ export function AuthPage({ initialMode = "login" }: { initialMode?: Exclude<Mode
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const auth = useAuth();
+  const requestedNext = new URLSearchParams(window.location.search).get("next");
+  const nextPage = requestedNext?.startsWith("/") && !requestedNext.startsWith("//") ? requestedNext : "/meetings";
 
   useEffect(() => {
     // Start waking the free backend as soon as the auth screen appears instead
@@ -45,7 +47,7 @@ export function AuthPage({ initialMode = "login" }: { initialMode?: Exclude<Mode
     try {
       if (mode === "login") {
         await auth.login(email, password);
-        window.location.assign("/meetings");
+        window.location.assign(nextPage);
       } else if (mode === "register") {
         if (password !== confirmPassword) throw new Error("Mật khẩu xác nhận chưa khớp.");
         if (!agreed) throw new Error("Bạn cần đồng ý với điều khoản sử dụng.");
@@ -54,7 +56,7 @@ export function AuthPage({ initialMode = "login" }: { initialMode?: Exclude<Mode
         setMode("verify");
       } else if (mode === "verify") {
         await auth.verifyOtp(email, code);
-        window.location.assign("/meetings");
+        window.location.assign(nextPage);
       } else if (mode === "forgot") {
         await authApi.forgotPassword(email);
         setNotice("Nếu email đã đăng ký, mã khôi phục đã được gửi. Hãy kiểm tra cả thư rác.");
@@ -91,6 +93,7 @@ export function AuthPage({ initialMode = "login" }: { initialMode?: Exclude<Mode
     setPending(true);
     setError("");
     try {
+      sessionStorage.setItem("bocbang.auth.next", nextPage);
       await auth.googleLogin();
     } catch (cause) {
       setError((cause as Error).message);

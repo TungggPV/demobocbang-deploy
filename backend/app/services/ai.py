@@ -35,6 +35,7 @@ from app.schemas.ai import (
 from app.schemas.media import JobErrorResponse, JobResponse
 from app.services.exports import ExportJobRunner
 from app.services.meetings import MeetingService
+from app.services.transcripts import TranscriptService
 from app.workers import lifecycle
 
 
@@ -51,7 +52,7 @@ class AIService:
             raise ApiError("PROVIDER_CAPABILITY_UNAVAILABLE", "Translation is not configured.", 503)
         if (payload.source_language, payload.target_language) not in self._translation.capabilities().supported_language_pairs:
             raise ApiError("PROVIDER_CAPABILITY_UNAVAILABLE", "This translation language pair is not supported.", 422)
-        version = await self._valid_current_transcript(meeting.current_transcript_version_id)
+        version = await TranscriptService(self._session).ensure_current_snapshot(meeting)
         job = Job(
             meeting_id=meeting.id,
             job_type="translation",
@@ -68,7 +69,7 @@ class AIService:
         meeting, _ = await self._meetings.require_access(meeting_id, user, MeetingPermission.EDIT)
         if self._llm is None or not self._llm.capabilities().structured_output:
             raise ApiError("PROVIDER_CAPABILITY_UNAVAILABLE", "AI summary generation is not configured.", 503)
-        version = await self._valid_current_transcript(meeting.current_transcript_version_id)
+        version = await TranscriptService(self._session).ensure_current_snapshot(meeting)
         job = Job(
             meeting_id=meeting.id,
             job_type="summary",
@@ -180,11 +181,21 @@ class AIJobDispatcher:
                 return False
             except (TranslationProviderError, LLMProviderError) as exc:
                 return await self._fail(session, job, exc.code, str(exc), exc.retryable)
-            except ValueError as exc:
-                return await self._fail(session, job, "AI_RESULT_INVALID", str(exc), False)
+            except ValueError:
+                message = (
+                    "Không thể tạo tệp từ dữ liệu hiện tại. Vui lòng kiểm tra nội dung và thử lại."
+                    if job.job_type == "export"
+                    else "Nội dung hiện tại chưa đủ hợp lệ để xử lý."
+                )
+                return await self._fail(session, job, "AI_RESULT_INVALID", message, False)
             except Exception:
                 code = "EXPORT_GENERATION_FAILED" if job.job_type == "export" else "AI_PROVIDER_ERROR"
-                return await self._fail(session, job, code, "The job could not complete.", True)
+                message = (
+                    "Hệ thống chưa thể tạo tệp. Đang thử lại."
+                    if job.job_type == "export"
+                    else "Dịch vụ AI tạm thời chưa xử lý được yêu cầu. Đang thử lại."
+                )
+                return await self._fail(session, job, code, message, True)
 
     async def _run_translation(self, session: AsyncSession, job: Job) -> None:
         if self._translation is None:
@@ -195,7 +206,14 @@ class AIJobDispatcher:
         if (source, target) not in self._translation.capabilities().supported_language_pairs:
             raise TranslationProviderError("This translation language pair is not supported.", code="PROVIDER_CAPABILITY_UNAVAILABLE", retryable=False)
         originals = await _valid_segments(session, version_id)
-        translated = await self._translation.translate_segments(tuple(TranscriptionSegment(item.start_ms, item.end_ms, item.text) for item in originals), source, target)
+        translated = await self._translation.translate_segments(
+            tuple(
+                TranscriptionSegment(item.start_ms, max(item.end_ms, item.start_ms + 1), item.text)
+                for item in originals
+            ),
+            source,
+            target,
+        )
         if len(translated) != len(originals) or any(not item.text.strip() for item in translated):
             raise ValueError("Translation provider returned invalid segment output.")
         translation = Translation(meeting_id=job.meeting_id, transcript_version_id=version_id, source_language=source, target_language=target)
@@ -240,7 +258,7 @@ class AIJobDispatcher:
 
 async def _valid_segments(session: AsyncSession, version_id: UUID) -> list[SegmentVersion]:
     segments = list(await session.scalars(select(SegmentVersion).where(SegmentVersion.transcript_version_id == version_id).order_by(SegmentVersion.sequence)))
-    if not segments or any(not item.text.strip() or item.start_ms >= item.end_ms for item in segments):
+    if not segments or any(not item.text.strip() for item in segments):
         raise ValueError("Transcript input is empty or invalid.")
     return segments
 

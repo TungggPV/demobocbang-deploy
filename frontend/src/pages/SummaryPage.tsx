@@ -4,7 +4,7 @@ import { useAsync } from "../hooks/useAsync";
 import { useJobMonitor } from "../state/useJobMonitor";
 import { can } from "../utils/permissions";
 import type { SummaryLanguage, SummaryTemplate } from "../types/domain";
-import { Button, Empty, Failure, Loading, PageHeading, Status } from "../components/ui";
+import { Button, Empty, Failure, Loading, PageHeading, Status, statusLabel } from "../components/ui";
 
 const labels: Record<SummaryTemplate, string> = {
   general: "Tóm tắt chung",
@@ -22,6 +22,7 @@ export function SummaryPage({ meetingId }: { meetingId: string }) {
   const [template, setTemplate] = useState<SummaryTemplate>("general");
   const [outputLanguage, setOutputLanguage] = useState<SummaryLanguage>("vi");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     const transcriptLanguage = meeting.data?.language_mode;
@@ -48,6 +49,7 @@ export function SummaryPage({ meetingId }: { meetingId: string }) {
   async function generate() {
     try {
       setError("");
+      setNotice("");
       jobs.track(await meetingsApi.summary(meetingId, template, outputLanguage));
     } catch (cause) {
       setError((cause as Error).message);
@@ -58,6 +60,8 @@ export function SummaryPage({ meetingId }: { meetingId: string }) {
     if (!summary) return;
     try {
       await navigator.clipboard.writeText(toText(summary.current_version.content));
+      setNotice("Đã sao chép tóm tắt.");
+      setError("");
     } catch {
       setError("Không thể sao chép nội dung trong trình duyệt này.");
     }
@@ -68,7 +72,6 @@ export function SummaryPage({ meetingId }: { meetingId: string }) {
       eyebrow="TÓM TẮT"
       title="Tóm tắt"
       context={meeting.data.title}
-      actions={<a className="btn btn-light" href={`/meetings/${meetingId}`}>Bản ghi</a>}
     />
     <section className="summary-controls">
       <label className="field">Mẫu
@@ -86,15 +89,16 @@ export function SummaryPage({ meetingId }: { meetingId: string }) {
       </label>
       {editable && <Button
         tone="dark"
-        disabled={!hasTranscript || !capabilities.data?.summary_templates.includes(template) || jobs.job?.status === "processing"}
+        disabled={!hasTranscript || !capabilities.data?.summary_templates.includes(template) || ["queued", "processing", "retrying"].includes(jobs.job?.status ?? "")}
         onClick={() => void generate()}
       >{summary ? "Tạo lại" : "Tạo tóm tắt"}</Button>}
       {summary && <Button onClick={() => void copy()}>Sao chép</Button>}
     </section>
     {editable && !hasTranscript && <div className="notice">Cần có transcript trước khi tạo tóm tắt.</div>}
+    {notice && <div className="notice">{notice}</div>}
     {error && <div className="form-error">{error}</div>}
     {jobs.job && <div className={`job-state ${jobs.job.status}`}>
-      Tóm tắt AI: {jobs.job.status}
+      Tóm tắt AI: {statusLabel(jobs.job.status)}
       {jobs.job.progress !== undefined ? ` · ${jobs.job.progress}%` : ""}
       {jobs.job.error ? ` · ${jobs.job.error.message}` : ""}
     </div>}

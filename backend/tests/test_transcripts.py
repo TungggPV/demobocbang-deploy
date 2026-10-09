@@ -84,6 +84,56 @@ def test_edit_split_merge_delete_and_version_creation(tmp_path: Path) -> None:
         assert len(client.get(f"/api/v1/meetings/{seeded['meeting_id']}/transcript", headers=headers).json()["segments"]) == 1
 
 
+def test_text_edit_split_and_multi_merge_work_with_zero_duration_segment(tmp_path: Path) -> None:
+    app, sender, url = _app(tmp_path)
+    with TestClient(app) as client:
+        owner = _session(client, sender, "text-tools@example.com")
+        seeded = _seed(url, UUID(owner["user"]["id"]))
+
+        async def make_zero_duration() -> None:
+            engine = create_async_engine(url)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                segment = await session.scalar(
+                    select(CurrentSegment).where(
+                        CurrentSegment.logical_segment_id == UUID(seeded["first"])
+                    )
+                )
+                assert segment is not None
+                segment.end_ms = segment.start_ms
+                await session.commit()
+            await engine.dispose()
+
+        asyncio.run(make_zero_duration())
+        headers = _headers(owner)
+        edited = client.patch(
+            f"/api/v1/segments/{seeded['first']}",
+            headers=headers,
+            json={"text": "Một hai"},
+        )
+        assert edited.status_code == 200
+        split = client.post(
+            f"/api/v1/segments/{seeded['first']}/split",
+            headers=headers,
+            json={"split_at_ms": 1, "first_text": "Một", "second_text": "hai"},
+        )
+        assert split.status_code == 200
+        segments = client.get(
+            f"/api/v1/meetings/{seeded['meeting_id']}/transcript", headers=headers
+        ).json()["segments"]
+        merged = client.post(
+            "/api/v1/segments/merge",
+            headers=headers,
+            json={"segment_ids": [item["logical_segment_id"] for item in segments]},
+        )
+        assert merged.status_code == 200
+        current = client.get(
+            f"/api/v1/meetings/{seeded['meeting_id']}/transcript", headers=headers
+        ).json()["segments"]
+        assert len(current) == 1
+        assert current[0]["text"] == "Một hai Second segment"
+
+
 def test_speaker_assignment_and_edit_permissions(tmp_path: Path) -> None:
     app, sender, url = _app(tmp_path)
     with TestClient(app) as client:

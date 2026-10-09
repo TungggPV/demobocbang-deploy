@@ -12,9 +12,15 @@ from app.main import create_app
 class CapturingEmailSender:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str, str]] = []
+        self.invitations: list[tuple[str, str, str, str]] = []
 
     async def send_otp(self, recipient: str, code: str, purpose: str) -> None:
         self.messages.append((recipient, code, purpose))
+
+    async def send_invitation(
+        self, recipient: str, meeting_title: str, permission: str, url: str
+    ) -> None:
+        self.invitations.append((recipient, meeting_title, permission, url))
 
 
 def test_meeting_crud_and_collaborator_acl(tmp_path: Path) -> None:
@@ -77,6 +83,12 @@ def test_meeting_crud_and_collaborator_acl(tmp_path: Path) -> None:
         assert invited.status_code == 201
         assert invited.json()["user_id"] == collaborator["user"]["id"]
         assert invited.json()["permission"] == "edit"
+        assert sender.invitations[-1] == (
+            "member@example.com",
+            "Sprint planning",
+            "edit",
+            f"http://localhost:5173/meetings/{meeting_id}",
+        )
 
         listed_for_member = client.get("/api/v1/meetings", headers=member_headers)
         assert listed_for_member.status_code == 200
@@ -142,7 +154,9 @@ def test_owner_managed_share_links_only_return_token_once(tmp_path: Path) -> Non
 
     with TestClient(app) as client:
         owner = _verified_session(client, sender, "owner@example.com", "Owner")
+        collaborator = _verified_session(client, sender, "shared@example.com", "Shared user")
         headers = _headers(owner)
+        collaborator_headers = _headers(collaborator)
         meeting_id = client.post(
             "/api/v1/meetings",
             headers=headers,
@@ -151,10 +165,24 @@ def test_owner_managed_share_links_only_return_token_once(tmp_path: Path) -> Non
         created = client.post(
             f"/api/v1/meetings/{meeting_id}/shares",
             headers=headers,
-            json={"permission": "comment"},
+            json={"permission": "edit"},
         )
         assert created.status_code == 201
         assert created.json()["token"]
+        token = created.json()["token"]
+        assert client.get(
+            f"/api/v1/meetings/{meeting_id}", headers=collaborator_headers
+        ).status_code == 403
+        redeemed = client.post(
+            f"/api/v1/shares/{token}/redeem", headers=collaborator_headers
+        )
+        assert redeemed.status_code == 200
+        assert redeemed.json()["permission"] == "edit"
+        assert client.patch(
+            f"/api/v1/meetings/{meeting_id}",
+            headers=collaborator_headers,
+            json={"title": "Edited through shared link"},
+        ).status_code == 200
         share_id = created.json()["id"]
         listed = client.get(f"/api/v1/meetings/{meeting_id}/shares", headers=headers)
         assert listed.status_code == 200

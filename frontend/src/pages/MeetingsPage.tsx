@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { meetingsApi } from "../api/endpoints";
 import { useAsync } from "../hooks/useAsync";
 import type { Meeting, MeetingStatus } from "../types/domain";
-import { Button, Empty, Failure, Icon, Loading, PageHeading, Status } from "../components/ui";
+import { Button, Empty, Failure, Icon, Loading, PageHeading, Status, statusLabel } from "../components/ui";
 
 const statuses: Array<{ value: "" | MeetingStatus; label: string }> = [
   { value: "", label: "Tất cả trạng thái" },
@@ -166,7 +166,7 @@ function MediaDialog({ meeting, close }: { meeting: Meeting; close: () => void }
   }
 
   return <>
-    <div className="dialog-backdrop"><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="media-title"><button className="close" onClick={close} type="button" aria-label="Đóng">×</button><h2 id="media-title">Tệp của cuộc họp</h2><p>Xóa audio không xóa transcript đã tạo.</p>{media.loading && <Loading />}{media.error && <Failure error={media.error} retry={media.reload} />}{media.data?.length === 0 && <p>Không còn tệp media được lưu.</p>}{media.data?.map((item) => <div className="media-item" key={item.id}><div><strong>{item.original_filename}</strong><small>{(item.size_bytes / 1024 / 1024).toFixed(1)} MB · {item.status}</small></div><Button tone="danger" onClick={() => setPending({ id: item.id, name: item.original_filename })}>Xóa tệp</Button></div>)}</section></div>
+    <div className="dialog-backdrop"><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="media-title"><button className="close" onClick={close} type="button" aria-label="Đóng">×</button><h2 id="media-title">Tệp của cuộc họp</h2><p>Xóa audio không xóa transcript đã tạo.</p>{media.loading && <Loading />}{media.error && <Failure error={media.error} retry={media.reload} />}{media.data?.length === 0 && <p>Không còn tệp media được lưu.</p>}{media.data?.map((item) => <div className="media-item" key={item.id}><div><strong>{item.original_filename}</strong><small>{(item.size_bytes / 1024 / 1024).toFixed(1)} MB · {statusLabel(item.status)}</small></div><Button tone="danger" onClick={() => setPending({ id: item.id, name: item.original_filename })}>Xóa tệp</Button></div>)}</section></div>
     {pending && <ConfirmDialog title="Xóa tệp audio?" detail={`Tệp “${pending.name}” sẽ bị xóa. Transcript được giữ lại theo chính sách demo.`} confirmLabel="Xóa tệp" close={() => setPending(undefined)} confirm={() => void remove()} />}
   </>;
 }

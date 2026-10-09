@@ -119,16 +119,73 @@ class TranscriptService:
     async def merge_segments(
         self, payload: SegmentMergeRequest, user: User
     ) -> TranscriptMutationResponse:
-        meeting, first, transcript = await self._projection_context(payload.first_segment_id, user)
-        second = await self._session.scalar(select(CurrentSegment).where(CurrentSegment.logical_segment_id == payload.second_segment_id).with_for_update())
-        if second is None or second.transcript_id != transcript.id or not await self._are_adjacent(first, second):
-            raise ApiError("SEGMENTS_NOT_MERGEABLE", "Segments must be adjacent in the current transcript.", 422)
+        segment_ids = payload.resolved_segment_ids()
+        meeting, _, transcript = await self._projection_context(segment_ids[0], user)
+        selected = list(
+            await self._session.scalars(
+                select(CurrentSegment)
+                .where(
+                    CurrentSegment.transcript_id == transcript.id,
+                    CurrentSegment.logical_segment_id.in_(segment_ids),
+                )
+                .order_by(CurrentSegment.position, CurrentSegment.logical_segment_id)
+                .with_for_update()
+            )
+        )
+        if len(selected) != len(segment_ids):
+            raise ApiError("SEGMENTS_NOT_MERGEABLE", "All selected segments must belong to the current transcript.", 422)
+        all_ids = list(
+            await self._session.scalars(
+                select(CurrentSegment.logical_segment_id)
+                .where(CurrentSegment.transcript_id == transcript.id)
+                .order_by(CurrentSegment.position, CurrentSegment.logical_segment_id)
+                .with_for_update()
+            )
+        )
+        indexes = sorted(all_ids.index(item.logical_segment_id) for item in selected)
+        if indexes != list(range(indexes[0], indexes[0] + len(indexes))):
+            raise ApiError("SEGMENTS_NOT_MERGEABLE", "The selected segments must be consecutive.", 422)
+        first = selected[0]
         version = await self._new_user_version(meeting, transcript, user)
-        first.end_ms = second.end_ms
-        first.text = f"{first.text.rstrip()} {second.text.lstrip()}".strip()
-        await self._session.delete(second)
-        await self._event(transcript, version, user.id, "segments_merged", {"first_logical_segment_id": str(first.logical_segment_id), "second_logical_segment_id": str(second.logical_segment_id), "end_ms": first.end_ms, "text": first.text})
+        first.end_ms = selected[-1].end_ms
+        first.text = " ".join(item.text.strip() for item in selected if item.text.strip())
+        for item in selected[1:]:
+            await self._session.delete(item)
+        await self._event(
+            transcript,
+            version,
+            user.id,
+            "segments_merged",
+            {
+                "logical_segment_ids": [str(item.logical_segment_id) for item in selected],
+                "end_ms": first.end_ms,
+                "text": first.text,
+            },
+        )
         return await self._finish_mutation(meeting, transcript, version, first)
+
+    async def ensure_current_snapshot(self, meeting: Meeting) -> TranscriptVersion:
+        """Materialize the current editable projection for AI and export jobs."""
+        version = await self._current_version(meeting)
+        existing = await self._session.scalar(
+            select(func.count(SegmentVersion.id)).where(
+                SegmentVersion.transcript_version_id == version.id
+            )
+        )
+        if existing:
+            return version
+        transcript = await self._transcript_for_meeting(meeting.id)
+        current_count = await self._session.scalar(
+            select(func.count(CurrentSegment.id)).where(
+                CurrentSegment.transcript_id == transcript.id,
+                func.length(func.trim(CurrentSegment.text)) > 0,
+            )
+        )
+        if not current_count:
+            raise ApiError("TRANSCRIPT_INVALID", "Transcript input is empty or invalid.", 422)
+        self._require_projection(transcript)
+        await self._checkpoint(transcript, version)
+        return version
 
     async def list_speakers(self, meeting_id: UUID, user: User) -> list[SpeakerResponse]:
         await self._meetings.require_access(meeting_id, user, MeetingPermission.READ)
@@ -353,9 +410,13 @@ class TranscriptService:
         self, logical_id: UUID, user: User, payload: SegmentEditRequest
     ) -> TranscriptMutationResponse:
         meeting, segment, transcript = await self._projection_context(logical_id, user)
-        for field, value in payload.model_dump(exclude_unset=True).items():
+        changes = payload.model_dump(exclude_unset=True)
+        for field, value in changes.items():
             setattr(segment, field, value.strip() if field == "text" and isinstance(value, str) else value)
-        await self._validate_current_neighbors(transcript.id, segment)
+        if not segment.text.strip():
+            raise ApiError("INVALID_SEGMENT_TEXT", "Segment text cannot be empty.", 422)
+        if {"start_ms", "end_ms"} & changes.keys():
+            await self._validate_current_neighbors(transcript.id, segment)
         version = await self._new_user_version(meeting, transcript, user)
         await self._event(transcript, version, user.id, "segment_edited", {"logical_segment_id": str(segment.logical_segment_id), **{key: getattr(segment, key) for key in payload.model_fields_set}})
         return await self._finish_mutation(meeting, transcript, version, segment)
@@ -380,7 +441,11 @@ class TranscriptService:
         self, logical_id: UUID, user: User, payload: SegmentSplitRequest
     ) -> TranscriptMutationResponse:
         meeting, segment, transcript = await self._projection_context(logical_id, user)
-        if not segment.start_ms < payload.split_at_ms < segment.end_ms:
+        text_split = bool(payload.first_text and payload.second_text)
+        old_end = segment.end_ms
+        effective_end = max(old_end, segment.start_ms + 2) if text_split else old_end
+        split_at_ms = max(segment.start_ms + 1, min(effective_end - 1, payload.split_at_ms))
+        if not segment.start_ms < split_at_ms < effective_end:
             raise ApiError("INVALID_SEGMENT_TIMESTAMPS", "split_at_ms must fall inside the segment.", 422)
         words = segment.text.split()
         midpoint = max(1, len(words) // 2)
@@ -389,12 +454,11 @@ class TranscriptService:
         if not first_text or not second_text:
             raise ApiError("INVALID_SEGMENT_SPLIT", "Both split segments require text.", 422)
         position = await self._next_position(transcript.id, segment)
-        old_end = segment.end_ms
-        segment.end_ms, segment.text = payload.split_at_ms, first_text
-        created = CurrentSegment(transcript_id=transcript.id, logical_segment_id=uuid4(), speaker_id=segment.speaker_id, position=position, start_ms=payload.split_at_ms, end_ms=old_end, text=second_text, original_stt_text=segment.original_stt_text, confidence=segment.confidence)
+        segment.end_ms, segment.text = split_at_ms, first_text
+        created = CurrentSegment(transcript_id=transcript.id, logical_segment_id=uuid4(), speaker_id=segment.speaker_id, position=position, start_ms=split_at_ms, end_ms=effective_end, text=second_text, original_stt_text=segment.original_stt_text, confidence=segment.confidence)
         self._session.add(created)
         version = await self._new_user_version(meeting, transcript, user)
-        await self._event(transcript, version, user.id, "segment_split", {"logical_segment_id": str(segment.logical_segment_id), "new_logical_segment_id": str(created.logical_segment_id), "split_at_ms": payload.split_at_ms, "first_text": first_text, "second_text": second_text, "new_position": str(position)})
+        await self._event(transcript, version, user.id, "segment_split", {"logical_segment_id": str(segment.logical_segment_id), "new_logical_segment_id": str(created.logical_segment_id), "split_at_ms": split_at_ms, "first_text": first_text, "second_text": second_text, "new_position": str(position)})
         return await self._finish_mutation(meeting, transcript, version, segment)
 
     async def _projection_context(

@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 
 from app.api.v1.routes.auth import CurrentUserDependency
 from app.api.v1.routes.exports import ExportServiceDependency
 from app.api.v1.routes.media import MediaServiceDependency
-from app.core.dependencies import DatabaseSessionDependency
+from app.core.dependencies import DatabaseSessionDependency, get_settings
 from app.models.enums import MeetingSourceType, MeetingStatus
 from app.schemas.meeting import (
     MeetingCreateRequest,
@@ -118,8 +118,17 @@ async def add_member(
     payload: MeetingMemberCreateRequest,
     user: CurrentUserDependency,
     service: MeetingServiceDependency,
+    request: Request,
 ) -> dict[str, object]:
-    return await service.add_member(meeting_id, user, payload)
+    sender = request.app.state.email_sender
+    settings = get_settings(request)
+    return await service.add_member(
+        meeting_id,
+        user,
+        payload,
+        sender if hasattr(sender, "send_invitation") else None,
+        f"{settings.frontend_origins[0]}/meetings/{meeting_id}",
+    )
 
 
 @router.patch("/{meeting_id}/members/{user_id}", response_model=MeetingMemberResponse)

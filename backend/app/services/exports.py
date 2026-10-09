@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import io
+import html
 import json
 import os
 import re
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -25,6 +27,7 @@ from app.models.user import User
 from app.providers.storage import MediaStorage, StorageError
 from app.schemas.export import ExportCreateRequest, ExportResponse
 from app.services.meetings import MeetingService
+from app.services.transcripts import TranscriptService
 
 _CONTENT_TYPES = {
     ExportFormat.TXT: "text/plain; charset=utf-8",
@@ -45,7 +48,7 @@ class ExportService:
         self, meeting_id: UUID, user: User, payload: ExportCreateRequest
     ) -> ExportResponse:
         meeting, _ = await self._meetings.require_access(meeting_id, user, MeetingPermission.READ)
-        version = await self._current_version(meeting)
+        version = await TranscriptService(self._session).ensure_current_snapshot(meeting)
         export = Export(
             meeting_id=meeting.id, transcript_version_id=version.id, format=payload.format
         )
@@ -267,8 +270,15 @@ def _document(
             "title": meeting.title,
             "description": meeting.description,
             "language_mode": meeting.language_mode,
+            "status": meeting.status.value,
+            "source_type": meeting.source_type.value,
+            "duration_ms": meeting.duration_ms,
             "created_at": meeting.created_at.isoformat(),
             "transcript_version_id": str(export.transcript_version_id),
+        },
+        "export": {
+            "format": export.format.value,
+            "created_at": datetime.now(UTC).isoformat(),
         },
         "options": options,
         "segments": [],
@@ -287,12 +297,27 @@ def _document(
         data["segments"].append(row)
     if options["include_summary"] and summary is not None:
         data["summary"] = summary
+    warnings: list[str] = []
+    if options["include_translation"] and not translation:
+        warnings.append("Chưa có bản dịch phù hợp với phiên bản nội dung hiện tại.")
+    if options["include_summary"] and summary is None:
+        warnings.append("Chưa có tóm tắt phù hợp với phiên bản nội dung hiện tại.")
+    if warnings:
+        data["warnings"] = warnings
     return data
 
 
 def _render(format: ExportFormat, data: dict[str, object]) -> bytes:
     if format == ExportFormat.JSON:
-        return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        payload = dict(data)
+        payload["segments"] = []
+        for item in data["segments"]:
+            row = dict(item)
+            if not data["options"]["include_timestamps"]:
+                row.pop("start_ms", None)
+                row.pop("end_ms", None)
+            payload["segments"].append(row)
+        return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     if format in (ExportFormat.SRT, ExportFormat.VTT):
         return _subtitles(data, format).encode("utf-8")
     text = _plain_text(data)
@@ -300,18 +325,50 @@ def _render(format: ExportFormat, data: dict[str, object]) -> bytes:
         return text.encode("utf-8")
     if format == ExportFormat.DOCX:
         from docx import Document
+        from docx.shared import Pt
 
         document = Document()
         document.add_heading(str(data["meeting"]["title"]), 0)
-        for line in text.splitlines():
-            document.add_paragraph(line)
+        meeting = data["meeting"]
+        if meeting.get("description"):
+            document.add_paragraph(str(meeting["description"]))
+        document.add_heading("Thông tin", level=1)
+        table = document.add_table(rows=0, cols=2)
+        table.style = "Light Shading Accent 1"
+        for label, value in _meeting_details(meeting):
+            cells = table.add_row().cells
+            cells[0].text, cells[1].text = label, value
+        document.add_heading("Nội dung", level=1)
+        for index, item in enumerate(data["segments"], start=1):
+            paragraph = document.add_paragraph()
+            prefix = _segment_prefix(item, data["options"], index)
+            paragraph.add_run(prefix).bold = True
+            paragraph.add_run(str(item["text"]))
+            if item.get("translation"):
+                translated = document.add_paragraph(style="Intense Quote")
+                translated.add_run("Bản dịch: ").bold = True
+                translated.add_run(str(item["translation"]))
+        if data.get("summary"):
+            document.add_heading("Tóm tắt", level=1)
+            for heading, values in _summary_sections(data["summary"]):
+                document.add_heading(heading, level=2)
+                for value in values:
+                    document.add_paragraph(value, style="List Bullet" if len(values) > 1 else None)
+        for warning in data.get("warnings", []):
+            document.add_paragraph(str(warning), style="Intense Quote")
+        styles = document.styles
+        styles["Normal"].font.name = "Arial"
+        styles["Normal"].font.size = Pt(10.5)
         buffer = io.BytesIO()
         document.save(buffer)
         return buffer.getvalue()
     from reportlab.lib.pagesizes import A4
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.pdfgen.canvas import Canvas
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
     # DejaVu is shipped by many Linux images; failure is a stable failed job rather than mojibake.
     font = next(
@@ -329,39 +386,43 @@ def _render(format: ExportFormat, data: dict[str, object]) -> bytes:
         raise ValueError("A Unicode PDF font is not configured.")
     pdfmetrics.registerFont(TTFont("ExportUnicode", font))
     buffer = io.BytesIO()
-    canvas = Canvas(buffer, pagesize=A4)
-    canvas.setFont("ExportUnicode", 11)
-    y = 800
-    for line in text.splitlines():
-        for part in _wrap(line, 95):
-            canvas.drawString(42, y, part)
-            y -= 15
-            if y < 42:
-                canvas.showPage()
-                canvas.setFont("ExportUnicode", 11)
-                y = 800
-    canvas.save()
+    pdf = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm, topMargin=17 * mm, bottomMargin=17 * mm, title=str(data["meeting"]["title"]))
+    base = getSampleStyleSheet()
+    body = ParagraphStyle("ExportBody", parent=base["BodyText"], fontName="ExportUnicode", fontSize=10.5, leading=16, spaceAfter=5)
+    title = ParagraphStyle("ExportTitle", parent=body, fontSize=20, leading=25, alignment=TA_CENTER, spaceAfter=14)
+    heading = ParagraphStyle("ExportHeading", parent=body, fontSize=13, leading=18, spaceBefore=10, spaceAfter=6)
+    story = [Paragraph(html.escape(str(data["meeting"]["title"])), title)]
+    for line in text.splitlines()[2:]:
+        stripped = line.strip()
+        if not stripped:
+            story.append(Spacer(1, 4 * mm))
+        elif stripped in {"THÔNG TIN", "NỘI DUNG", "TÓM TẮT", "LƯU Ý"}:
+            story.append(Paragraph(stripped, heading))
+        else:
+            story.append(Paragraph(html.escape(line).replace("  ", "&nbsp;&nbsp;"), body))
+    pdf.build(story)
     return buffer.getvalue()
 
 
 def _plain_text(data: dict[str, object]) -> str:
     meeting = data["meeting"]
-    lines = [str(meeting["title"]), "", f"Language: {meeting['language_mode']}"]
+    lines = ["BẢN GHI CUỘC HỌP", str(meeting["title"]), "", "THÔNG TIN"]
+    lines.extend(f"{label}: {value}" for label, value in _meeting_details(meeting))
     if meeting.get("description"):
-        lines.append(str(meeting["description"]))
-    for item in data["segments"]:
-        prefix = (
-            f"[{_timestamp(item['start_ms'])} - {_timestamp(item['end_ms'])}] "
-            if data["options"]["include_timestamps"]
-            else ""
-        )
-        if item.get("speaker"):
-            prefix += f"{item['speaker']}: "
-        lines.append(prefix + str(item["text"]))
+        lines.extend(["", "Mô tả", str(meeting["description"])])
+    lines.extend(["", "NỘI DUNG"])
+    for index, item in enumerate(data["segments"], start=1):
+        lines.append(_segment_prefix(item, data["options"], index) + str(item["text"]))
         if item.get("translation"):
-            lines.append(f"  Translation: {item['translation']}")
+            lines.append(f"   Bản dịch: {item['translation']}")
     if data.get("summary"):
-        lines.extend(["", "Summary", json.dumps(data["summary"], ensure_ascii=False)])
+        lines.extend(["", "TÓM TẮT"])
+        for heading, values in _summary_sections(data["summary"]):
+            lines.append(heading)
+            lines.extend(f"- {value}" for value in values)
+    if data.get("warnings"):
+        lines.extend(["", "LƯU Ý"])
+        lines.extend(f"- {value}" for value in data["warnings"])
     return "\n".join(lines) + "\n"
 
 
@@ -376,6 +437,8 @@ def _subtitles(data: dict[str, object], format: ExportFormat) -> str:
         )
         label = f"{item['speaker']}: " if item.get("speaker") else ""
         lines.append(label + str(item["text"]))
+        if item.get("translation"):
+            lines.append(str(item["translation"]))
         lines.append("")
     return "\n".join(lines)
 
@@ -393,5 +456,36 @@ def _filename(title: str, format: ExportFormat) -> str:
     return f"{stem}.{format.value}"
 
 
-def _wrap(value: str, width: int) -> list[str]:
-    return [value[index : index + width] for index in range(0, len(value), width)] or [""]
+def _meeting_details(meeting: dict[str, object]) -> list[tuple[str, str]]:
+    language = {"vi": "Tiếng Việt", "en": "Tiếng Anh", "auto": "Tự động nhận diện"}.get(str(meeting["language_mode"]), str(meeting["language_mode"]))
+    created = str(meeting["created_at"]).replace("T", " ").replace("+00:00", " UTC")
+    status = {"created": "Đã tạo", "recording": "Đang ghi âm", "processing": "Đang xử lý", "completed": "Hoàn tất", "failed": "Thất bại"}.get(str(meeting.get("status")), str(meeting.get("status", "")))
+    source = {"realtime": "Ghi âm trực tiếp", "upload": "Tệp tải lên"}.get(str(meeting.get("source_type")), str(meeting.get("source_type", "")))
+    return [("Trạng thái", status), ("Nguồn", source), ("Ngôn ngữ", language), ("Ngày tạo", created), ("Phiên bản nội dung", str(meeting["transcript_version_id"]))]
+
+
+def _segment_prefix(item: dict[str, object], options: dict[str, object], index: int) -> str:
+    parts = [f"{index}."]
+    if options["include_timestamps"]:
+        parts.append(f"[{_timestamp(item['start_ms'])} – {_timestamp(item['end_ms'])}]")
+    if options["include_speakers"]:
+        parts.append(f"{item.get('speaker') or 'Chưa xác định'}:")
+    return " ".join(parts) + " "
+
+
+def _summary_sections(summary: object) -> list[tuple[str, list[str]]]:
+    if not isinstance(summary, dict):
+        return [("Nội dung", [str(summary)])]
+    labels = {"overview": "Tổng quan", "key_points": "Ý chính", "action_items": "Công việc cần làm", "decisions": "Quyết định", "risks_notes": "Rủi ro và lưu ý"}
+    sections: list[tuple[str, list[str]]] = []
+    for key, value in summary.items():
+        heading = labels.get(str(key), str(key).replace("_", " ").capitalize())
+        if isinstance(value, list):
+            values = [str(item) for item in value if str(item).strip()]
+        elif isinstance(value, dict):
+            values = [f"{child}: {content}" for child, content in value.items()]
+        else:
+            values = [str(value)] if str(value).strip() else []
+        if values:
+            sections.append((heading, values))
+    return sections

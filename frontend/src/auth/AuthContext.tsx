@@ -25,7 +25,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(!oauthRefreshToken);
   const persist = useCallback((next: AuthSession | null) => { sessionRef.current = next; setSession(next); next ? sessionStorage.setItem(KEY, JSON.stringify(next)) : sessionStorage.removeItem(KEY); }, []);
   const refresh = useCallback(async () => { try { const next = await authApi.refresh(sessionRef.current?.refresh_token); persist(next); return true; } catch { persist(null); return false; } }, [persist]);
-  useEffect(() => { if (oauthRefreshToken) void authApi.refresh(oauthRefreshToken).then(persist).catch(() => persist(null)).finally(() => setReady(true)); }, [oauthRefreshToken, persist]);
+  useEffect(() => { if (oauthRefreshToken) void authApi.refresh(oauthRefreshToken).then((next) => { persist(next); const target = sessionStorage.getItem("bocbang.auth.next"); if (target?.startsWith("/") && !target.startsWith("//")) { sessionStorage.removeItem("bocbang.auth.next"); window.location.assign(target); } }).catch(() => persist(null)).finally(() => setReady(true)); }, [oauthRefreshToken, persist]);
   // Configure during render so child effects cannot issue an unauthenticated
   // request before this provider's useEffect has run.
   configureApiAuth(() => sessionRef.current?.access_token ?? null, refresh);

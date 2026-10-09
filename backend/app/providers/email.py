@@ -16,10 +16,14 @@ from app.core.errors import ApiError
 
 class EmailSender(Protocol):
     async def send_otp(self, recipient: str, code: str, purpose: str) -> None: ...
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None: ...
 
 
 class UnavailableEmailSender:
     async def send_otp(self, recipient: str, code: str, purpose: str) -> None:
+        raise ApiError("EMAIL_DELIVERY_UNAVAILABLE", "Email delivery is not configured.", 503)
+
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None:
         raise ApiError("EMAIL_DELIVERY_UNAVAILABLE", "Email delivery is not configured.", 503)
 
 
@@ -36,6 +40,9 @@ class ConsoleEmailSender:
             f"==========================================\n",
             flush=True,
         )
+
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None:
+        print(f"[DEV EMAIL INVITATION] To: {recipient} | Meeting: {meeting_title} | Permission: {permission} | URL: {url}", flush=True)
 
 
 class SmtpEmailSender:
@@ -60,6 +67,20 @@ class SmtpEmailSender:
         message["To"] = recipient
         message["Subject"] = subject
         message.set_content(f"Your verification code is {code}. It expires in 10 minutes.")
+        try:
+            await asyncio.to_thread(self._send, message)
+        except OSError as exc:
+            raise ApiError("EMAIL_DELIVERY_FAILED", "Unable to send email.", 502) from exc
+
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None:
+        message = EmailMessage()
+        message["From"] = self._sender
+        message["To"] = recipient
+        message["Subject"] = f"Bạn được mời cộng tác: {meeting_title}"
+        message.set_content(
+            f"Bạn được mời vào bản ghi “{meeting_title}” với quyền {permission}.\n\n"
+            f"Mở bản ghi: {url}\n\nNếu bạn chưa đăng nhập, hãy dùng đúng địa chỉ email nhận thư này."
+        )
         try:
             await asyncio.to_thread(self._send, message)
         except OSError as exc:
@@ -119,6 +140,29 @@ class BrevoEmailSender:
                         "api-key": self._api_key,
                         "content-type": "application/json",
                     },
+                    json=payload,
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ApiError("EMAIL_DELIVERY_FAILED", "Unable to send email.", 502) from exc
+
+    async def send_invitation(self, recipient: str, meeting_title: str, permission: str, url: str) -> None:
+        labels = {"read": "chỉ xem", "comment": "xem và bình luận", "edit": "chỉnh sửa"}
+        payload = {
+            "sender": {"name": "Bóc Băng", "email": self._sender},
+            "to": [{"email": recipient}],
+            "subject": f"Bạn được mời cộng tác: {meeting_title}",
+            "textContent": (
+                f"Bạn được mời vào bản ghi “{meeting_title}” với quyền {labels.get(permission, permission)}.\n\n"
+                f"Mở bản ghi: {url}\n\n"
+                "Nếu bạn chưa đăng nhập, hãy dùng đúng địa chỉ email nhận thư này."
+            ),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15, transport=self._transport) as client:
+                response = await client.post(
+                    self._API_URL,
+                    headers={"accept": "application/json", "api-key": self._api_key, "content-type": "application/json"},
                     json=payload,
                 )
                 response.raise_for_status()

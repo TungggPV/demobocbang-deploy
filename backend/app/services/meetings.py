@@ -15,6 +15,7 @@ from app.models.enums import MeetingPermission, MeetingSourceType, MeetingStatus
 from app.models.meeting import Meeting, MeetingMember, ShareLink
 from app.models.transcript import CurrentSegment, Transcript
 from app.models.user import User
+from app.providers.email import EmailSender
 from app.schemas.auth import UserResponse
 from app.schemas.meeting import (
     AccessLevel,
@@ -174,7 +175,8 @@ class MeetingService:
         return rows
 
     async def add_member(
-        self, meeting_id: UUID, actor: User, payload: MeetingMemberCreateRequest
+        self, meeting_id: UUID, actor: User, payload: MeetingMemberCreateRequest,
+        email_sender: EmailSender | None = None, invitation_url: str | None = None,
     ) -> dict[str, object]:
         meeting, _ = await self.require_access(meeting_id, actor, "owner")
         target = await self._member_target(payload)
@@ -183,12 +185,19 @@ class MeetingService:
                 "OWNER_CANNOT_BE_MEMBER", "The meeting owner is not a collaborator.", 400
             )
         existing = await self._session.get(MeetingMember, (meeting_id, target.id))
-        if existing is not None:
-            raise ApiError("MEMBER_ALREADY_EXISTS", "This user is already a collaborator.", 409)
-        member = MeetingMember(
-            meeting_id=meeting_id, user_id=target.id, permission=payload.permission
-        )
-        self._session.add(member)
+        if existing is None:
+            member = MeetingMember(
+                meeting_id=meeting_id, user_id=target.id, permission=payload.permission
+            )
+            self._session.add(member)
+        else:
+            member = existing
+            member.permission = payload.permission
+        await self._session.flush()
+        if email_sender is not None and invitation_url is not None:
+            await email_sender.send_invitation(
+                target.email, meeting.title, payload.permission.value, invitation_url
+            )
         await self._session.commit()
         await self._session.refresh(member)
         return {
@@ -282,6 +291,20 @@ class MeetingService:
         if meeting is None:
             raise ApiError("SHARE_INVALID", "This share link is invalid, expired, or revoked.", 404)
         return meeting, share.permission
+
+    async def redeem_share(self, token: str, user: User) -> MeetingResponse:
+        meeting, permission = await self.resolve_share_entity(token)
+        if meeting.owner_id == user.id:
+            return self._meeting_response(meeting, "owner")
+        member = await self._session.get(MeetingMember, (meeting.id, user.id))
+        if member is None:
+            member = MeetingMember(meeting_id=meeting.id, user_id=user.id, permission=permission)
+            self._session.add(member)
+        elif _PERMISSION_RANK[permission] > _PERMISSION_RANK[member.permission]:
+            member.permission = permission
+        await self._session.commit()
+        await self._session.refresh(meeting)
+        return self._meeting_response(meeting, member.permission)
 
     async def _member_target(self, payload: MeetingMemberCreateRequest) -> User:
         target = (

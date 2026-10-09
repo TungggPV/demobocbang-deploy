@@ -114,8 +114,25 @@ class SegmentSplitRequest(BaseModel):
 
 
 class SegmentMergeRequest(BaseModel):
-    first_segment_id: UUID
-    second_segment_id: UUID
+    segment_ids: list[UUID] | None = Field(default=None, min_length=2, max_length=250)
+    first_segment_id: UUID | None = None
+    second_segment_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def require_segments(self) -> SegmentMergeRequest:
+        ids = self.resolved_segment_ids()
+        if len(ids) < 2 or len(set(ids)) != len(ids):
+            raise ValueError("At least two distinct segments are required.")
+        return self
+
+    def resolved_segment_ids(self) -> list[UUID]:
+        if self.segment_ids is not None:
+            return self.segment_ids
+        return [
+            item
+            for item in (self.first_segment_id, self.second_segment_id)
+            if item is not None
+        ]
 
 
 class SegmentSpeakerRequest(BaseModel):

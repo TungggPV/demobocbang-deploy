@@ -44,7 +44,7 @@ export const meetingsApi = {
   saveSegment: (id: string, body: { text?: string; start_ms?: number; end_ms?: number }) => apiClient.patch<TranscriptMutation>(`/segments/${id}`, body),
   deleteSegment: (id: string) => apiClient.delete<TranscriptMutation>(`/segments/${id}`),
   splitSegment: (id: string, split_at_ms: number, first_text?: string, second_text?: string) => apiClient.post<TranscriptMutation>(`/segments/${id}/split`, { split_at_ms, first_text, second_text }),
-  mergeSegments: (first_segment_id: string, second_segment_id: string) => apiClient.post<TranscriptMutation>("/segments/merge", { first_segment_id, second_segment_id }),
+  mergeSegments: (segment_ids: string[]) => apiClient.post<TranscriptMutation>("/segments/merge", { segment_ids }),
   speakers: (id: string) => apiClient.get<Speaker[]>(`/meetings/${id}/speakers`),
   updateSpeaker: (id: string, body: Partial<Speaker>) => apiClient.patch<Speaker>(`/speakers/${id}`, body),
   speakerSample: (id: string) => apiClient.get<SpeakerSample>(`/speakers/${id}/sample`),
@@ -60,6 +60,7 @@ export const meetingsApi = {
   updateComment: (id: string, body: string) => apiClient.patch<Comment>(`/comments/${id}`, { body }),
   deleteComment: (id: string) => apiClient.delete<void>(`/comments/${id}`),
   export: (id: string, format: ExportFormat, options = { include_timestamps: true, include_speakers: true, include_translation: false, include_summary: false }) => apiClient.post<ExportArtifact>(`/meetings/${id}/exports`, { format, options }),
+  getExport: (id: string) => apiClient.get<ExportArtifact>(`/exports/${id}`),
   exportDownloadUrl: (id: string) => `${config.apiBaseUrl}/exports/${id}/download`,
   downloadExport: (id: string) => apiClient.getBlob(`/exports/${id}/download`),
   createShare: (id: string, permission: Exclude<Permission, "owner">, expires_at?: string) => apiClient.post<CreatedShareLink>(`/meetings/${id}/shares`, { permission, expires_at }),
@@ -70,4 +71,5 @@ export const jobsApi = { get: (id: string) => apiClient.get<Job>(`/jobs/${id}`) 
 export const sharesApi = {
   resolve: (token: string) => apiClient.get<{ meeting: Meeting; permission: Exclude<Permission, "owner"> }>(`/shares/${token}`),
   transcript: (token: string) => apiClient.get<{ meeting: Meeting; permission: Exclude<Permission, "owner">; transcript: Transcript }>(`/shares/${token}/transcript`),
+  redeem: (token: string) => apiClient.post<Meeting>(`/shares/${token}/redeem`),
 };

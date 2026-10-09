@@ -32,21 +32,21 @@ class _GeminiBase:
                 response = await client.post(
                     f"{self._api_base_url}/models/{self._model}:generateContent",
                     headers={"x-goog-api-key": self._key},
-                    json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema}},
+                    json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema}},
                 )
         except httpx.HTTPError as exc:
-            raise LLMProviderError("Gemini could not be reached.", code="GEMINI_NETWORK_ERROR", retryable=True) from exc
+            raise LLMProviderError("Không thể kết nối tới dịch vụ AI.", code="GEMINI_NETWORK_ERROR", retryable=True) from exc
         if response.is_error:
             retryable = response.status_code == 429 or response.status_code >= 500
-            raise LLMProviderError("Gemini rejected the request.", code="GEMINI_HTTP_ERROR", retryable=retryable)
+            raise LLMProviderError("Dịch vụ AI chưa thể xử lý yêu cầu này. Vui lòng thử lại.", code="GEMINI_HTTP_ERROR", retryable=retryable)
         try:
             payload = response.json()
             text = payload["candidates"][0]["content"]["parts"][0]["text"]
             result = json.loads(text)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            raise LLMProviderError("Gemini returned invalid structured output.", code="GEMINI_RESULT_INVALID", retryable=True) from exc
+            raise LLMProviderError("Kết quả từ dịch vụ AI chưa hợp lệ. Hệ thống sẽ thử lại.", code="GEMINI_RESULT_INVALID", retryable=True) from exc
         if not isinstance(result, dict):
-            raise LLMProviderError("Gemini returned invalid structured output.", code="GEMINI_RESULT_INVALID", retryable=True)
+            raise LLMProviderError("Kết quả từ dịch vụ AI chưa hợp lệ. Hệ thống sẽ thử lại.", code="GEMINI_RESULT_INVALID", retryable=True)
         return result
 
 
