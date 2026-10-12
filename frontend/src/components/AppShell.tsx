@@ -48,8 +48,10 @@ export function AppShell({ children }: { children: ReactNode }) {
     [`/meetings/${meetingId}/export-share`, "export", "Xuất"],
   ] : [];
 
+  const meetingsSelected = path.startsWith("/meetings") && path !== "/meetings/create";
+
   return <div className="shell">
-    <aside className="sidebar">
+    <aside className="sidebar desktop-sidebar">
       <a className="brand" href="/meetings" aria-label="Bóc Băng">
         <span className="brand-mark"><Icon name="brand" /></span>
         <strong>Bóc Băng</strong>
@@ -125,8 +127,38 @@ export function AppShell({ children }: { children: ReactNode }) {
     </aside>
 
     <main>
+      {meetingNav.length > 0 && (
+        <nav className="mobile-meeting-nav" aria-label="Công cụ bản ghi">
+          {meetingNav.map(([href, icon, label]) => (
+            <a
+              className={path === href ? "selected" : ""}
+              href={href}
+              key={href}
+              aria-current={path === href ? "page" : undefined}
+            >
+              <Icon name={icon} />
+              <span>{label}</span>
+            </a>
+          ))}
+        </nav>
+      )}
       <div className="content">{children}</div>
     </main>
+
+    <nav className="mobile-bottom-nav" aria-label="Điều hướng chính">
+      <a className={meetingsSelected ? "selected" : ""} href="/meetings" aria-current={meetingsSelected ? "page" : undefined}>
+        <span className="mobile-nav-icon"><Icon name="meeting" /></span>
+        <span>Cuộc họp</span>
+      </a>
+      <a className={`mobile-new-action ${path === "/meetings/create" ? "selected" : ""}`} href="/meetings/create" aria-current={path === "/meetings/create" ? "page" : undefined}>
+        <span className="mobile-nav-icon"><Icon name="plus" /></span>
+        <span>Tạo mới</span>
+      </a>
+      <a className={path === "/settings" ? "selected" : ""} href="/settings" aria-current={path === "/settings" ? "page" : undefined}>
+        <span className="mobile-nav-icon"><Icon name="profile" /></span>
+        <span>Tài khoản</span>
+      </a>
+    </nav>
 
     <ThemeToggle className="shell-theme-toggle" />
 
