@@ -6,7 +6,6 @@ import { Button, Empty, Failure, Icon, Loading, PageHeading, Status, statusLabel
 
 const statuses: Array<{ value: "" | MeetingStatus; label: string }> = [
   { value: "", label: "Tất cả trạng thái" },
-  { value: "created", label: "Chưa bắt đầu" },
   { value: "recording", label: "Đang ghi âm" },
   { value: "processing", label: "Đang xử lý" },
   { value: "ready", label: "Sẵn sàng chỉnh sửa" },
@@ -20,21 +19,33 @@ export function MeetingsPage({ createOnly = false, initialSource }: { createOnly
 
 function MeetingsOverview() {
   const [query, setQuery] = useState("");
-  const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"" | MeetingStatus>("");
   const [source, setSource] = useState<"" | Meeting["source_type"]>("");
+  const [appliedFilters, setAppliedFilters] = useState({
+    search: "",
+    status: "" as "" | MeetingStatus,
+    source: "" as "" | Meeting["source_type"],
+  });
   const [mediaMeeting, setMediaMeeting] = useState<Meeting>();
   const [pendingDelete, setPendingDelete] = useState<Meeting>();
-  const statusInventory = useAsync(() => meetingsApi.list({ limit: 250 }), []);
+  const statusInventory = useAsync((signal) => meetingsApi.list({ limit: 250 }, signal), []);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setSearch(query.trim()), 300);
+    const timer = window.setTimeout(
+      () => setAppliedFilters({ search: query.trim(), status, source }),
+      250,
+    );
     return () => window.clearTimeout(timer);
-  }, [query]);
+  }, [query, status, source]);
 
   const meetings = useAsync(
-    () => meetingsApi.list({ limit: 50, q: search || undefined, status: status || undefined, source_type: source || undefined }),
-    [search, status, source],
+    (signal) => meetingsApi.list({
+      limit: 50,
+      q: appliedFilters.search || undefined,
+      status: appliedFilters.status || undefined,
+      source_type: appliedFilters.source || undefined,
+    }, signal),
+    [appliedFilters.search, appliedFilters.status, appliedFilters.source],
   );
   const filtering = Boolean(query || status || source);
   const visibleStatuses = statuses.filter(
@@ -68,7 +79,8 @@ function MeetingsOverview() {
       <select aria-label="Lọc nguồn âm thanh" value={source} onChange={(event) => setSource(event.target.value as typeof source)}><option value="">Tất cả nguồn</option><option value="realtime">Ghi âm</option><option value="upload">Tải tệp</option></select>
     </div>
     {meetings.loading && <Loading />}
-    {meetings.error && <Failure error={meetings.error} retry={meetings.reload} />}
+    {meetings.error && !meetings.data && <Failure error={meetings.error} retry={meetings.reload} />}
+    {meetings.error && meetings.data && <div className="notice">Chưa thể cập nhật bộ lọc. Dữ liệu gần nhất vẫn được giữ lại. <Button onClick={meetings.reload}>Thử lại</Button></div>}
     {meetings.data && meetings.data.length === 0 && (
       filtering
         ? <Empty title="Không tìm thấy" detail="Thử từ khóa hoặc bộ lọc khác." />

@@ -74,6 +74,7 @@ def test_meeting_crud_and_collaborator_acl(tmp_path: Path) -> None:
         meeting = created.json()
         meeting_id = meeting["id"]
         assert meeting["permission"] == "owner"
+        assert meeting["status"] == "recording"
 
         forbidden = client.get(f"/api/v1/meetings/{meeting_id}", headers=outsider_headers)
         assert forbidden.status_code == 403

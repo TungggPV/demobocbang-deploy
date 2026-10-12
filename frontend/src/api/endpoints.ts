@@ -28,7 +28,7 @@ export const authApi = {
 };
 
 export const meetingsApi = {
-  list: (page?: Page) => apiClient.get<Meeting[]>(`/meetings${pageQuery(page)}`),
+  list: (page?: Page, signal?: AbortSignal) => apiClient.get<Meeting[]>(`/meetings${pageQuery(page)}`, { signal }),
   get: (id: string) => apiClient.get<Meeting>(`/meetings/${id}`),
   create: (body: Pick<Meeting, "title" | "description" | "source_type" | "language_mode" | "diarization_enabled">) => apiClient.post<Meeting>("/meetings", body),
   update: (id: string, body: Partial<Pick<Meeting, "title" | "description" | "language_mode" | "diarization_enabled">>) => apiClient.patch<Meeting>(`/meetings/${id}`, body),

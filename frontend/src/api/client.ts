@@ -25,7 +25,24 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true, re
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${config.apiBaseUrl}${path}`, { ...init, headers, credentials: "include" });
+  const fetchOptions = { ...init, headers, credentials: "include" as const };
+  let response: Response;
+  try {
+    response = await fetch(`${config.apiBaseUrl}${path}`, fetchOptions);
+  } catch (cause) {
+    if (init.signal?.aborted) throw cause;
+    const method = init.method?.toUpperCase() ?? "GET";
+    if (method !== "GET") {
+      throw new ApiError(0, "NETWORK_ERROR", "Không thể kết nối máy chủ. Vui lòng thử lại.");
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    try {
+      response = await fetch(`${config.apiBaseUrl}${path}`, fetchOptions);
+    } catch (retryCause) {
+      if (init.signal?.aborted) throw retryCause;
+      throw new ApiError(0, "NETWORK_ERROR", "Không thể kết nối máy chủ. Vui lòng thử lại.");
+    }
+  }
   if (response.status === 401 && !isPublicAuthRequest && retry && await refreshAccessToken()) return request<T>(path, init, false, responseType);
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as ApiErrorShape;
@@ -36,7 +53,7 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true, re
 }
 
 export const apiClient = {
-  get: <T>(path: string) => request<T>(path),
+  get: <T>(path: string, init: RequestInit = {}) => request<T>(path, init),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", body: body instanceof FormData ? body : JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),

@@ -45,7 +45,10 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     language_mode: Mapped[str] = mapped_column(String(35), nullable=False)
     diarization_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[MeetingStatus] = mapped_column(
-        domain_enum(MeetingStatus, "meeting_status"), nullable=False, default=MeetingStatus.CREATED, index=True
+        domain_enum(MeetingStatus, "meeting_status"),
+        nullable=False,
+        default=MeetingStatus.RECORDING,
+        index=True,
     )
     duration_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     current_transcript_version_id: Mapped[UUID | None] = mapped_column(

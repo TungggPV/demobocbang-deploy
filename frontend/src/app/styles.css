@@ -600,7 +600,7 @@ input[readonly] { background: var(--surface-soft); color: var(--muted); }
 }
 .status.ready, .status.completed, .speaker-state.identified { background: var(--success-soft); color: var(--success); }
 .status.failed  { background: var(--danger-soft); color: var(--danger); }
-.status.recording, .status.processing, .status.queued, .status.retrying {
+.status.created, .status.recording, .status.processing, .status.queued, .status.retrying {
   background: var(--accent-soft);
   color: var(--accent-text);
 }

@@ -44,7 +44,11 @@ class MeetingService:
         self._session = session
 
     async def create(self, owner: User, payload: MeetingCreateRequest) -> MeetingResponse:
-        meeting = Meeting(owner_id=owner.id, **payload.model_dump())
+        meeting = Meeting(
+            owner_id=owner.id,
+            status=MeetingStatus.RECORDING,
+            **payload.model_dump(),
+        )
         self._session.add(meeting)
         await self._session.commit()
         await self._session.refresh(meeting)

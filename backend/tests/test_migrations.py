@@ -158,3 +158,46 @@ def test_editable_upload_status_migration_backfills_completed_uploads(tmp_path: 
             assert rows == {"realtime": "completed", "upload": "ready"}
     finally:
         engine.dispose()
+
+
+def test_recording_default_migration_backfills_created_meetings(tmp_path: Path) -> None:
+    database_path = tmp_path / "recording-default.sqlite3"
+    async_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    config = migration_config(async_url)
+    command.upgrade(config, "20261012_0011")
+
+    engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    identifiers = {
+        "user_id": "10000000000000000000000000000001",
+        "meeting_id": "20000000000000000000000000000002",
+    }
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, email, full_name) "
+                    "VALUES (:user_id, 'recording@example.com', 'Recording User')"
+                ),
+                identifiers,
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO meetings "
+                    "(id, owner_id, title, source_type, language_mode, status) "
+                    "VALUES (:meeting_id, :user_id, 'Draft', 'upload', 'vi', 'created')"
+                ),
+                identifiers,
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    try:
+        with engine.connect() as connection:
+            status = connection.execute(
+                text("SELECT status FROM meetings WHERE id = :meeting_id"), identifiers
+            ).scalar_one()
+            assert status == "recording"
+    finally:
+        engine.dispose()
