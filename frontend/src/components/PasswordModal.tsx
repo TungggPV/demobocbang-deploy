@@ -40,8 +40,11 @@ export function PasswordModal({ close, updatePassword, hasPassword = true }: Pas
     <section className="dialog" style={{ width: 440 }} role="dialog" aria-modal="true" aria-labelledby="password-dialog-title">
       <button type="button" className="close" aria-label="Đóng" onClick={close}><Icon name="close" /></button>
       <h2 id="password-dialog-title">{hasPassword ? "Đổi mật khẩu" : "Tạo mật khẩu"}</h2>
-      <p>Bảo mật tài khoản của bạn bằng một mật khẩu mạnh.</p>
-      {success ? <div className="notice" style={{ marginTop: 24 }}>Đổi mật khẩu thành công!</div> : (
+      <p>{hasPassword
+        ? "Nhập mật khẩu hiện tại để xác nhận thay đổi."
+        : "Không bắt buộc. Tạo mật khẩu nếu bạn muốn đăng nhập thêm bằng email."}
+      </p>
+      {success ? <div className="notice" style={{ marginTop: 24 }}>{hasPassword ? "Đổi mật khẩu thành công!" : "Tạo mật khẩu thành công!"}</div> : (
         <form className="compact-form" style={{ marginTop: 24 }} onSubmit={save}>
           {hasPassword && <label className="field full">Mật khẩu hiện tại
             <div className="input-group">
@@ -64,7 +67,7 @@ export function PasswordModal({ close, updatePassword, hasPassword = true }: Pas
           {error && <div className="form-error">{error}</div>}
           <div className="form-actions" style={{ marginTop: 24 }}>
             <Button type="button" className="btn-ghost" onClick={close}>Hủy</Button>
-            <Button type="submit" tone="dark" disabled={saving}>{saving ? "Đang xử lý…" : "Cập nhật mật khẩu"}</Button>
+            <Button type="submit" tone="dark" disabled={saving}>{saving ? "Đang xử lý…" : hasPassword ? "Đổi mật khẩu" : "Tạo mật khẩu"}</Button>
           </div>
         </form>
       )}

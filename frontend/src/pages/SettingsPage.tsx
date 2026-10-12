@@ -75,11 +75,14 @@ export function SettingsPage() {
         <div className="setting-row">
           <div className="setting-icon"><Icon name="lock" /></div>
           <div className="setting-content">
-            <strong>Mật khẩu</strong>
-            <small>Thay đổi mật khẩu đăng nhập của bạn.</small>
+            <strong>{user?.has_password === false ? "Tạo mật khẩu" : "Mật khẩu"}</strong>
+            <small>{user?.has_password === false
+              ? "Không bắt buộc. Tạo mật khẩu để có thể đăng nhập thêm bằng email."
+              : "Thay đổi mật khẩu đăng nhập của bạn."}
+            </small>
           </div>
           <div className="setting-action">
-            <Button onClick={() => setPasswordModal(true)}>Đổi mật khẩu</Button>
+            <Button onClick={() => setPasswordModal(true)}>{user?.has_password === false ? "Tạo mật khẩu" : "Đổi mật khẩu"}</Button>
           </div>
         </div>
         <div className="setting-row">

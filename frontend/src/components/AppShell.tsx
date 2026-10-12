@@ -102,7 +102,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </button>
             <button className="account-popup-item" type="button" onClick={() => { setPasswordModal(true); setMenuOpen(false); }}>
               <Icon name="lock" />
-              <span>Đổi mật khẩu</span>
+              <span>{user?.has_password === false ? "Tạo mật khẩu" : "Đổi mật khẩu"}</span>
             </button>
             <div className="account-popup-divider"></div>
             <button className="account-popup-item text-danger" type="button" onClick={() => void logout()}>

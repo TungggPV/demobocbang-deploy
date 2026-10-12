@@ -93,10 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const storedTarget = sessionStorage.getItem("bocbang.auth.next");
       const target = storedTarget?.startsWith("/") && !storedTarget.startsWith("//") ? storedTarget : "/meetings";
       sessionStorage.removeItem("bocbang.auth.next");
-      const destination = next.user.has_password === false
-        ? `/set-password?next=${encodeURIComponent(target)}`
-        : target;
-      window.location.assign(destination);
+      window.location.assign(target);
     }).catch(() => persist(null)).finally(() => setReady(true));
   }, [oauthRefreshToken, persist]);
   // Configure during render so child effects cannot issue an unauthenticated
