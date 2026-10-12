@@ -149,12 +149,9 @@ def test_assemblyai_batch_auto_detect_is_limited_to_vietnamese_and_english(
     request = client.posts[1][1]["json"]
     assert isinstance(request, dict)
     assert "language_code" not in request
-    assert request["language_detection"] is True
-    assert request["language_detection_options"] == {
-        "expected_languages": ["vi", "en"],
-        "fallback_language": "auto",
-        "code_switching": True,
-    }
+    assert request["language_codes"] == ["vi", "en"]
+    assert "language_detection" not in request
+    assert "language_detection_options" not in request
     assert result.language == "en"
 
 
@@ -326,16 +323,16 @@ def test_assemblyai_stream_uses_configured_model_waits_for_begin_and_termination
         query = parse_qs(urlparse(captured_url).query)
         assert query["speech_model"] == ["universal-3-6-pro"]
         assert query["mode"] == ["balanced"]
-        assert query["language_code"] == ["vi"]
-        assert "language_codes" not in query
+        assert query["language_codes"] == ['["vi"]']
+        assert query["language_detection"] == ["true"]
+        assert "language_code" not in query
         assert query["encoding"] == ["pcm_s16le"]
         assert query["speaker_labels"] == ["true"]
         assert query["min_turn_silence"] == ["560"]
         assert query["max_turn_silence"] == ["2000"]
         assert query["keyterms_prompt"] == ['["Bóc Băng"]']
         assert query["prompt"] == [
-            "Transcribe Vietnamese. Preserve the spoken words in Vietnamese; "
-            "this is a Vietnamese business meeting with multiple speakers."
+            "Vietnamese business meeting between multiple participants."
         ]
 
         await websocket.incoming.put(json.dumps({
@@ -407,14 +404,18 @@ def test_assemblyai_stream_auto_detects_each_vietnamese_or_english_turn(
             ),
         )
         query = parse_qs(urlparse(captured_url).query)
-        assert query["speech_model"] == ["whisper-rt"]
+        assert query["speech_model"] == ["universal-3-6-pro"]
+        assert query["mode"] == ["balanced"]
+        assert query["language_codes"] == ['["vi", "en"]']
         assert query["language_detection"] == ["true"]
-        assert query["format_turns"] == ["true"]
         assert query["speaker_labels"] == ["true"]
         assert "language_code" not in query
-        assert "mode" not in query
-        assert "prompt" not in query
-        assert "keyterms_prompt" not in query
+        assert "format_turns" not in query
+        assert query["prompt"] == [
+            "Bilingual Vietnamese and English business meeting between multiple participants. "
+            "Topic and known context: Cuộc họp bilingual"
+        ]
+        assert query["keyterms_prompt"] == ['["Bóc Băng"]']
 
         await websocket.incoming.put(
             json.dumps(

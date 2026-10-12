@@ -94,10 +94,12 @@ dependencies only. If SMTP runs on the host machine, use
 `EMAIL_SMTP_HOST=host.docker.internal` with Docker Desktop.
 
 Realtime AssemblyAI defaults to `universal-3-6-pro` in `max_accuracy` mode. The
-backend sends the selected meeting language as `language_codes` and the browser
-captures mono PCM16 audio through an AudioWorklet. Override the provider model
-or latency/accuracy preset with `ASSEMBLYAI_STREAMING_MODEL` and
-`ASSEMBLYAI_STREAMING_MODE` in the root `.env`.
+backend sends the selected meeting language as `language_codes`; automatic mode
+is constrained to Vietnamese and English for native code-switching instead of
+switching to a less accurate fallback recognizer. Uploaded recordings use the
+same two-language steering. The browser captures mono PCM16 audio through an
+AudioWorklet. Override the provider model or latency/accuracy preset with
+`ASSEMBLYAI_STREAMING_MODEL` and `ASSEMBLYAI_STREAMING_MODE` in the root `.env`.
 
 During realtime recording, users may enable transient VI ↔ EN translation from
 the recording panel. Only finalized STT segments are translated; hiding the

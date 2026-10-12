@@ -78,12 +78,10 @@ class AssemblyAIProvider:
                 "speaker_labels": options.diarization,
             }
             if options.language == "auto":
-                request["language_detection"] = True
-                request["language_detection_options"] = {
-                    "expected_languages": ["vi", "en"],
-                    "fallback_language": "auto",
-                    "code_switching": True,
-                }
+                # Universal-3.5 Pro natively handles code-switching. Steering it
+                # toward the two languages exposed by the product is more
+                # accurate than running a separate whole-file language guess.
+                request["language_codes"] = ["vi", "en"]
             elif options.language in {"vi", "en"}:
                 request["language_code"] = options.language
             prompt = _transcription_prompt(options.language, options.context)
@@ -171,39 +169,29 @@ class AssemblyAIStream:
             import websockets
 
             language = _streaming_language_code(options.language)
-            auto_detect = language == "auto"
+            language_codes = ["vi", "en"] if language == "auto" else [language]
             params: dict[str, object] = {
                 "sample_rate": 16000,
                 "encoding": options.audio_format or "pcm_s16le",
-                "speech_model": "whisper-rt" if auto_detect else streaming_model,
+                "speech_model": streaming_model,
+                "mode": streaming_mode,
+                # language_codes steers decoding; language_detection asks the
+                # provider to report the detected language on each final turn.
+                "language_codes": json.dumps(language_codes, ensure_ascii=False),
+                "language_detection": "true",
+                "min_turn_silence": min_turn_silence_ms,
+                "max_turn_silence": max_turn_silence_ms,
             }
-            if auto_detect:
-                # Whisper Streaming detects a language for each completed turn.
-                # The application only translates the vi/en results downstream.
-                params["language_detection"] = "true"
-                params["format_turns"] = "true"
-            else:
-                params.update(
-                    {
-                        "mode": streaming_mode,
-                        # A monolingual choice stays locked to avoid low-confidence
-                        # Vietnamese audio drifting into English.
-                        "language_code": language,
-                        "min_turn_silence": min_turn_silence_ms,
-                        "max_turn_silence": max_turn_silence_ms,
-                    }
-                )
             if options.diarization:
                 params["speaker_labels"] = "true"
-            if not auto_detect:
-                prompt = _transcription_prompt(language, options.context)
-                if prompt:
-                    params["prompt"] = prompt
-                keyterms = _keyterms(options.keyterms)
-                if keyterms:
-                    # The Streaming v3 handshake expects this query parameter to
-                    # contain a JSON array, not repeated scalar query parameters.
-                    params["keyterms_prompt"] = json.dumps(keyterms, ensure_ascii=False)
+            prompt = _transcription_prompt(language, options.context)
+            if prompt:
+                params["prompt"] = prompt
+            keyterms = _keyterms(options.keyterms)
+            if keyterms:
+                # Streaming array parameters are JSON strings in the raw
+                # WebSocket query (the SDK serializes these automatically).
+                params["keyterms_prompt"] = json.dumps(keyterms, ensure_ascii=False)
             query = urlencode(params, doseq=True)
             websocket = await websockets.connect(
                 f"{streaming_base_url}?{query}",
@@ -383,17 +371,16 @@ def _stream_provider_error(
     )
 
 def _transcription_prompt(language: str, context: str | None = None) -> str:
-    language_name = {
-        "vi": "Vietnamese",
-        "en": "English",
-        "auto": "Vietnamese and English with natural code-switching",
-    }.get(language, language)
-    base = (
-        f"Transcribe {language_name}. Preserve the spoken words in {language_name}; "
-        f"this is a {language_name} business meeting with multiple speakers."
-    )
+    # Universal Pro prompting expects a description of the recording, not
+    # formatting or transcription instructions. A concise scenario prompt gives
+    # names and domain vocabulary useful context without encouraging insertions.
+    base = {
+        "vi": "Vietnamese business meeting between multiple participants.",
+        "en": "English business meeting between multiple participants.",
+        "auto": "Bilingual Vietnamese and English business meeting between multiple participants.",
+    }.get(language, "Business meeting between multiple participants.")
     detail = context.strip() if context else ""
-    return f"{base} {detail}".strip()[:1750]
+    return f"{base} Topic and known context: {detail}".strip()[:1750] if detail else base
 
 
 def _keyterms(values: tuple[str, ...]) -> list[str]:

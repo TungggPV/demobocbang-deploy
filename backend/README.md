@@ -177,10 +177,13 @@ Groq may also be the primary summary provider with `LLM_PROVIDER=groq`.
 fallback. `ASSEMBLYAI_STREAMING_MODEL` defaults to `universal-3-6-pro` and is
 independent from the batch model. `ASSEMBLYAI_STREAMING_MODE` defaults to
 `max_accuracy`; meeting turn silence defaults to 560/2000 ms. Realtime sessions
-declare PCM16 encoding, steer to the selected language, enable diarization only
-when requested, and use meeting title/description as provider context. Final
-speaker revisions update the persisted STT segment before completion. Transcript
-confidence is averaged from word confidence and never from turn-end confidence.
+declare PCM16 encoding, steer to the selected language (or the VI/EN pair in
+automatic mode), enable diarization only when requested, and use meeting
+title/description as provider context. Uploaded recordings use the same VI/EN
+steering in automatic mode instead of making one language guess for the whole
+file. Final speaker revisions update the persisted STT segment before
+completion. Transcript confidence is averaged from word confidence and never
+from turn-end confidence.
 Summary requests
 require `output_language` set to `vi` or `en`.
 `ASSEMBLYAI_API_BASE_URL`, `ASSEMBLYAI_STREAMING_BASE_URL`, and
