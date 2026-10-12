@@ -8,7 +8,7 @@ export function Loading({ label = "Đang tải dữ liệu…" }: { label?: stri
 export function Failure({ error, retry }: { error: Error; retry?: () => void }) { return <div className="state state-error"><strong>Có lỗi xảy ra</strong><span>{error.message}</span>{retry && <Button onClick={retry}>Thử lại</Button>}</div>; }
 export function Empty({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) { return <div className="state"><strong>{title}</strong><span>{detail}</span>{action}</div>; }
 const statusLabels: Record<string, string> = {
-  created: "Đang ghi âm", queued: "Đang chờ", recording: "Đang ghi âm", processing: "Đang xử lý", ready: "Sẵn sàng chỉnh sửa", retrying: "Đang thử lại", completed: "Hoàn tất", failed: "Thất bại",
+  created: "Đang ghi âm", queued: "Đang chờ", recording: "Đang ghi âm", processing: "Đang xử lý", ready: "Đang ghi âm", retrying: "Đang thử lại", completed: "Hoàn tất", failed: "Thất bại",
 };
 export function statusLabel(value?: string) { return value ? (statusLabels[value] ?? value) : ""; }
 export function Status({ children, value }: { children?: ReactNode; value?: string }) { return <span className={`status ${value ?? ""}`}>{value ? statusLabel(value) : children}</span>; }

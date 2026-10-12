@@ -83,10 +83,10 @@ class MediaProcessingWorker:
                     meeting, meeting.owner_id, result.segments
                 )
                 meeting.duration_ms = media.duration_ms
-                # The background job and media processing are complete, but an
-                # uploaded meeting remains an editable draft until the user is
-                # done correcting its transcript.
-                meeting.status, media.status = MeetingStatus.READY, "completed"
+                # Processing the uploaded file does not finish the meeting. It
+                # stays in the same editable state as an active recording until
+                # the user is done correcting its transcript.
+                meeting.status, media.status = MeetingStatus.RECORDING, "completed"
                 await session.commit()
                 await lifecycle.completed(session, job)
                 return False

@@ -174,7 +174,7 @@ def test_media_upload_creates_queue_job_and_respects_acl(tmp_path: Path) -> None
                 f"/api/v1/meetings/{meeting_id}", headers=owner_headers
             )
             assert processed_meeting.status_code == 200
-            assert processed_meeting.json()["status"] == "ready"
+            assert processed_meeting.json()["status"] == "recording"
             transcript = client.get(
                 f"/api/v1/meetings/{meeting_id}/transcript", headers=owner_headers
             )

@@ -106,7 +106,7 @@ def test_summary_language_migration_backfills_from_meeting(tmp_path: Path) -> No
         engine.dispose()
 
 
-def test_editable_upload_status_migration_backfills_completed_uploads(tmp_path: Path) -> None:
+def test_upload_status_migrations_backfill_completed_uploads_as_recording(tmp_path: Path) -> None:
     database_path = tmp_path / "editable-upload-status.sqlite3"
     async_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
     config = migration_config(async_url)
@@ -155,7 +155,7 @@ def test_editable_upload_status_migration_backfills_completed_uploads(tmp_path: 
                     text("SELECT source_type, status FROM meetings ORDER BY source_type")
                 ).all()
             )
-            assert rows == {"realtime": "completed", "upload": "ready"}
+            assert rows == {"realtime": "completed", "upload": "recording"}
     finally:
         engine.dispose()
 
