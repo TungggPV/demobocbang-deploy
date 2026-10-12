@@ -1,5 +1,5 @@
 export type Permission = "read" | "comment" | "edit" | "owner";
-export type MeetingStatus = "created" | "recording" | "processing" | "completed" | "failed";
+export type MeetingStatus = "created" | "recording" | "processing" | "ready" | "completed" | "failed";
 export type JobStatus = "queued" | "processing" | "retrying" | "completed" | "failed";
 export type SummaryTemplate = "general" | "briefing" | "voting";
 export type SummaryLanguage = "vi" | "en";

@@ -104,3 +104,57 @@ def test_summary_language_migration_backfills_from_meeting(tmp_path: Path) -> No
             assert connection.execute(text("SELECT output_language FROM summaries")).scalar_one() == "en"
     finally:
         engine.dispose()
+
+
+def test_editable_upload_status_migration_backfills_completed_uploads(tmp_path: Path) -> None:
+    database_path = tmp_path / "editable-upload-status.sqlite3"
+    async_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    config = migration_config(async_url)
+    command.upgrade(config, "b326ebb08ce4")
+
+    engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    identifiers = {
+        "user_id": "10000000000000000000000000000001",
+        "upload_id": "20000000000000000000000000000002",
+        "realtime_id": "30000000000000000000000000000003",
+    }
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, email, full_name) "
+                    "VALUES (:user_id, 'status@example.com', 'Status User')"
+                ),
+                identifiers,
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO meetings "
+                    "(id, owner_id, title, source_type, language_mode, status) "
+                    "VALUES (:upload_id, :user_id, 'Upload', 'upload', 'vi', 'completed')"
+                ),
+                identifiers,
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO meetings "
+                    "(id, owner_id, title, source_type, language_mode, status) "
+                    "VALUES (:realtime_id, :user_id, 'Realtime', 'realtime', 'vi', 'completed')"
+                ),
+                identifiers,
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    try:
+        with engine.connect() as connection:
+            rows = dict(
+                connection.execute(
+                    text("SELECT source_type, status FROM meetings ORDER BY source_type")
+                ).all()
+            )
+            assert rows == {"realtime": "completed", "upload": "ready"}
+    finally:
+        engine.dispose()

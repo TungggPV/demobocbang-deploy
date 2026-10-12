@@ -2,6 +2,7 @@ import asyncio
 import wave
 from array import array
 from pathlib import Path
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -9,8 +10,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.core.config import Settings
 from app.db.base import Base
 from app.main import create_app
+from app.providers.contracts import (
+    BatchTranscriptionOptions,
+    STTCapabilities,
+    TranscriptionResult,
+    TranscriptionSegment,
+)
 from app.services.media import MediaService
-from app.services.media_worker import _has_audible_pcm
+from app.services.media_worker import MediaProcessingWorker, _has_audible_pcm
 
 
 def test_silent_pcm_is_rejected_before_stt(tmp_path: Path) -> None:
@@ -35,6 +42,34 @@ class CapturingEmailSender:
         self.messages.append((recipient, code, purpose))
 
 
+class SuccessfulBatchSTT:
+    def capabilities(self) -> STTCapabilities:
+        return STTCapabilities(
+            batch=True,
+            streaming=False,
+            diarization=True,
+            timestamps=True,
+            confidence=True,
+            supported_languages=frozenset({"vi", "en"}),
+            multilingual_auto_detect=True,
+        )
+
+    async def transcribe_file(
+        self, _source: Path, _options: BatchTranscriptionOptions
+    ) -> TranscriptionResult:
+        return TranscriptionResult(
+            language="vi",
+            segments=(
+                TranscriptionSegment(
+                    start_ms=0,
+                    end_ms=1_000,
+                    text="Nội dung vừa tải lên",
+                    confidence=0.98,
+                ),
+            ),
+        )
+
+
 def test_media_upload_creates_queue_job_and_respects_acl(tmp_path: Path) -> None:
     async def create_schema(database_url: str) -> None:
         engine = create_async_engine(database_url)
@@ -45,18 +80,17 @@ def test_media_upload_creates_queue_job_and_respects_acl(tmp_path: Path) -> None
     database_url = f"sqlite+aiosqlite:///{(tmp_path / 'media.sqlite3').as_posix()}"
     asyncio.run(create_schema(database_url))
     sender = CapturingEmailSender()
-    app = create_app(
-        Settings(
-            _env_file=None,
-            environment="production",
-            database_url=database_url,
-            redis_url="redis://test.invalid:6379/0",
-            jwt_secret="test-secret",
-            frontend_origins="http://localhost:5173",
-            media_storage_path=tmp_path / "objects",
-            max_upload_bytes=1_024,
-        )
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        database_url=database_url,
+        redis_url="redis://test.invalid:6379/0",
+        jwt_secret="test-secret",
+        frontend_origins="http://localhost:5173",
+        media_storage_path=tmp_path / "objects",
+        max_upload_bytes=1_024,
     )
+    app = create_app(settings)
     app.state.email_sender = sender
     queued_job_ids: list[object] = []
     app.state.enqueue_job = lambda job_id, _settings: queued_job_ids.append(str(job_id))
@@ -117,6 +151,51 @@ def test_media_upload_creates_queue_job_and_respects_acl(tmp_path: Path) -> None
                 ).status_code
                 == 403
             )
+
+            async def normalized_audio(_media: object) -> tuple[Path, Path]:
+                source = tmp_path / "worker-source.wav"
+                normalized = tmp_path / "worker-normalized.wav"
+                source.write_bytes(b"source")
+                with wave.open(str(normalized), "wb") as output:
+                    output.setparams((1, 2, 16_000, 0, "NONE", "not compressed"))
+                    output.writeframes(array("h", [0, 200, -200] * 1_000).tobytes())
+                return source, normalized
+
+            worker = MediaProcessingWorker(
+                app.state.database,
+                app.state.media_storage,
+                SuccessfulBatchSTT(),
+                settings,
+            )
+            worker._normalize = normalized_audio  # type: ignore[method-assign]
+            assert client.portal.call(worker.run, UUID(job["id"])) is False
+
+            processed_meeting = client.get(
+                f"/api/v1/meetings/{meeting_id}", headers=owner_headers
+            )
+            assert processed_meeting.status_code == 200
+            assert processed_meeting.json()["status"] == "ready"
+            transcript = client.get(
+                f"/api/v1/meetings/{meeting_id}/transcript", headers=owner_headers
+            )
+            segment_id = transcript.json()["segments"][0]["logical_segment_id"]
+            assert client.patch(
+                f"/api/v1/segments/{segment_id}",
+                headers=reader_headers,
+                json={"text": "Không được sửa"},
+            ).status_code == 403
+            edited = client.patch(
+                f"/api/v1/segments/{segment_id}",
+                headers=owner_headers,
+                json={"text": "Nội dung đã sửa"},
+            )
+            assert edited.status_code == 200
+            assert edited.json()["segment"]["text"] == "Nội dung đã sửa"
+            deleted = client.delete(
+                f"/api/v1/segments/{segment_id}", headers=owner_headers
+            )
+            assert deleted.status_code == 200
+
             assert (
                 client.delete(
                     f"/api/v1/meetings/{meeting_id}/media/{job['media_file_id']}",
@@ -130,8 +209,8 @@ def test_media_upload_creates_queue_job_and_respects_acl(tmp_path: Path) -> None
             )
             assert not [path for path in (tmp_path / "objects").rglob("*") if path.is_file()]
             deleted_job = client.get(f"/api/v1/jobs/{job['id']}", headers=owner_headers)
-            assert deleted_job.json()["status"] == "failed"
-            assert deleted_job.json()["error"]["code"] == "MEDIA_DELETED"
+            assert deleted_job.json()["status"] == "completed"
+            assert deleted_job.json()["error"] is None
     finally:
         MediaService._probe_duration = original_probe
 

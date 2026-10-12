@@ -25,6 +25,7 @@ class MeetingStatus(StrEnum):
     CREATED = "created"
     RECORDING = "recording"
     PROCESSING = "processing"
+    READY = "ready"
     COMPLETED = "completed"
     FAILED = "failed"
 

@@ -519,7 +519,7 @@ def _filename(title: str, format: ExportFormat, content_mode: str = "transcript"
 def _meeting_details(meeting: dict[str, object]) -> list[tuple[str, str]]:
     language = {"vi": "Tiếng Việt", "en": "Tiếng Anh", "auto": "Tự động nhận diện"}.get(str(meeting["language_mode"]), str(meeting["language_mode"]))
     created = str(meeting["created_at"]).replace("T", " ").replace("+00:00", " UTC")
-    status = {"created": "Chưa bắt đầu", "recording": "Đang ghi âm", "processing": "Đang xử lý", "completed": "Hoàn tất", "failed": "Thất bại"}.get(str(meeting.get("status")), str(meeting.get("status", "")))
+    status = {"created": "Chưa bắt đầu", "recording": "Đang ghi âm", "processing": "Đang xử lý", "ready": "Sẵn sàng chỉnh sửa", "completed": "Hoàn tất", "failed": "Thất bại"}.get(str(meeting.get("status")), str(meeting.get("status", "")))
     source = {"realtime": "Ghi âm trực tiếp", "upload": "Tệp tải lên"}.get(str(meeting.get("source_type")), str(meeting.get("source_type", "")))
     return [("Trạng thái", status), ("Nguồn", source), ("Ngôn ngữ", language), ("Ngày tạo", created), ("Phiên bản nội dung", str(meeting["transcript_version_id"]))]
 

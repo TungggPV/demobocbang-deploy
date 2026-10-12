@@ -9,6 +9,7 @@ const statuses: Array<{ value: "" | MeetingStatus; label: string }> = [
   { value: "created", label: "Chưa bắt đầu" },
   { value: "recording", label: "Đang ghi âm" },
   { value: "processing", label: "Đang xử lý" },
+  { value: "ready", label: "Sẵn sàng chỉnh sửa" },
   { value: "completed", label: "Hoàn tất" },
   { value: "failed", label: "Thất bại" },
 ];
