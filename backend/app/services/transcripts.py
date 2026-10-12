@@ -39,6 +39,7 @@ from app.schemas.transcript import (
     TranscriptVersionResponse,
 )
 from app.services.meetings import MeetingService
+from app.services.transcript_text import normalize_transcript_text
 
 
 class TranscriptService:
@@ -259,6 +260,8 @@ class TranscriptService:
         """Shared ingestion boundary for realtime and future upload/batch STT."""
         if not segment.text.strip() or segment.start_ms < 0 or segment.end_ms <= segment.start_ms:
             raise ValueError("Final transcript result is invalid.")
+        raw_text = segment.text.strip()
+        cleaned_text = normalize_transcript_text(raw_text)
         transcript = await self._ensure_transcript(meeting.id)
         latest_end_ms = await self._session.scalar(
             select(func.max(CurrentSegment.end_ms)).where(
@@ -295,8 +298,8 @@ class TranscriptService:
         sequence = int(await self._session.scalar(select(func.coalesce(func.max(SegmentVersion.sequence), 0) + 1).where(SegmentVersion.transcript_version_id == version.id)))
         stored = SegmentVersion(
             transcript_version_id=version.id, speaker_id=speaker_id, sequence=sequence,
-            start_ms=segment.start_ms, end_ms=segment.end_ms, text=segment.text.strip(),
-            original_stt_text=segment.text.strip(), confidence=segment.confidence,
+            start_ms=segment.start_ms, end_ms=segment.end_ms, text=cleaned_text,
+            original_stt_text=raw_text, confidence=segment.confidence,
         )
         self._session.add(stored)
         await self._session.flush()
@@ -359,6 +362,7 @@ class TranscriptService:
         self._session.add(version)
         await self._session.flush()
         for sequence, segment in enumerate(segments, start=1):
+            raw_text = segment.text.strip()
             self._session.add(
                 SegmentVersion(
                     transcript_version_id=version.id,
@@ -366,8 +370,8 @@ class TranscriptService:
                     sequence=sequence,
                     start_ms=segment.start_ms,
                     end_ms=segment.end_ms,
-                    text=segment.text.strip(),
-                    original_stt_text=segment.text.strip(),
+                    text=normalize_transcript_text(raw_text),
+                    original_stt_text=raw_text,
                     confidence=segment.confidence,
                 )
             )

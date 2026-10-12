@@ -89,6 +89,9 @@ def test_assemblyai_batch_sends_selected_language(tmp_path) -> None:
     assert request["language_code"] == "vi"
     assert request["speech_models"] == ["universal-3-5-pro", "universal-2"]
     assert request["speaker_labels"] is False
+    assert request["punctuate"] is True
+    assert request["format_text"] is True
+    assert request["disfluencies"] is False
     assert request["keyterms_prompt"] == ["Bóc Băng"]
     assert "Họp dự án Bóc Băng" in str(request["prompt"])
     assert result.language == "vi"
@@ -323,6 +326,7 @@ def test_assemblyai_stream_uses_configured_model_waits_for_begin_and_termination
         query = parse_qs(urlparse(captured_url).query)
         assert query["speech_model"] == ["universal-3-6-pro"]
         assert query["mode"] == ["balanced"]
+        assert query["format_turns"] == ["true"]
         assert query["language_codes"] == ['["vi"]']
         assert query["language_detection"] == ["true"]
         assert "language_code" not in query
@@ -410,7 +414,7 @@ def test_assemblyai_stream_auto_detects_each_vietnamese_or_english_turn(
         assert query["language_detection"] == ["true"]
         assert query["speaker_labels"] == ["true"]
         assert "language_code" not in query
-        assert "format_turns" not in query
+        assert query["format_turns"] == ["true"]
         assert query["prompt"] == [
             "Bilingual Vietnamese and English business meeting between multiple participants. "
             "Topic and known context: Cuộc họp bilingual"

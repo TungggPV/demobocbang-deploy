@@ -21,6 +21,7 @@ from app.schemas.auth import (
     EmailRequest,
     LoginRequest,
     OtpRequest,
+    PasswordUpdateRequest,
     RegisterRequest,
     RegisterResponse,
     ResetPasswordRequest,
@@ -119,6 +120,17 @@ async def update_current_user(
     service: AuthServiceDependency,
 ) -> UserResponse:
     return UserResponse.model_validate(await service.update_profile(user, payload.full_name))
+
+
+@router.patch("/me/password", response_model=UserResponse)
+async def update_current_user_password(
+    payload: PasswordUpdateRequest,
+    user: CurrentUserDependency,
+    service: AuthServiceDependency,
+) -> UserResponse:
+    return UserResponse.model_validate(
+        await service.update_password(user, payload.current_password, payload.new_password)
+    )
 
 
 @router.get("/google/start", include_in_schema=False)

@@ -4,6 +4,7 @@ import { AuthPage } from "../pages/AuthPage";
 import { ExportSharePage } from "../pages/ExportSharePage";
 import { MeetingPage } from "../pages/MeetingPage";
 import { MeetingsPage } from "../pages/MeetingsPage";
+import { PasswordSetupPage } from "../pages/PasswordSetupPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { SharePage } from "../pages/SharePage";
 import { SpeakersPage } from "../pages/SpeakersPage";
@@ -36,5 +37,6 @@ export function App() {
     </div>
   );
   if (!user) return <AuthPage initialMode={current.page === "auth" ? current.mode : "login"} />;
+  if (user.has_password === false) return <PasswordSetupPage />;
   return <AppShell>{current.page === "meeting" ? <MeetingPage meetingId={current.id} /> : current.page === "upload" ? <UploadPage meetingId={current.id} /> : current.page === "speakers" ? <SpeakersPage meetingId={current.id} /> : current.page === "translation" ? <TranslationPage meetingId={current.id} /> : current.page === "summary" ? <SummaryPage meetingId={current.id} /> : current.page === "export-share" ? <ExportSharePage meetingId={current.id} /> : current.page === "settings" ? <SettingsPage /> : current.page === "create" ? <MeetingsPage createOnly initialSource={new URLSearchParams(window.location.search).get("mode") === "upload" ? "upload" : undefined} /> : <MeetingsPage />}</AppShell>;
 }

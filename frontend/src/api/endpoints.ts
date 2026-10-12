@@ -23,7 +23,9 @@ export const authApi = {
   logout: () => apiClient.post<void>("/auth/logout"),
   forgotPassword: (email: string) => apiClient.post<void>("/auth/forgot-password", { email }),
   resetPassword: (email: string, code: string, new_password: string) => apiClient.post<void>("/auth/reset-password", { email, code, new_password }),
+  me: () => apiClient.get<User>("/auth/me"),
   updateProfile: (full_name: string) => apiClient.patch<User>("/auth/me", { full_name }),
+  updatePassword: (current_password: string | undefined, new_password: string) => apiClient.patch<User>("/auth/me/password", { current_password, new_password }),
   googleUrl: () => "/auth/google/start",
 };
 

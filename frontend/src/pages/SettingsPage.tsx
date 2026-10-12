@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../auth/AuthContext";
+import { PasswordModal } from "../components/PasswordModal";
 import { Button, Icon, PageHeading } from "../components/ui";
 
 export function SettingsPage() {
-  const { user, logout, updateProfile } = useAuth();
+  const { user, logout, updateProfile, updatePassword } = useAuth();
   const [fullName, setFullName] = useState(user?.full_name ?? "");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [passwordModal, setPasswordModal] = useState(false);
 
   useEffect(() => setFullName(user?.full_name ?? ""), [user?.full_name]);
 
@@ -22,11 +24,6 @@ export function SettingsPage() {
     } finally {
       setSaving(false);
     }
-  }
-
-  async function startPasswordReset() {
-    await logout();
-    window.location.assign("/forgot-password");
   }
 
   return <>
@@ -82,7 +79,7 @@ export function SettingsPage() {
             <small>Thay đổi mật khẩu đăng nhập của bạn.</small>
           </div>
           <div className="setting-action">
-            <Button onClick={() => void startPasswordReset()}>Đổi mật khẩu</Button>
+            <Button onClick={() => setPasswordModal(true)}>Đổi mật khẩu</Button>
           </div>
         </div>
         <div className="setting-row">
@@ -97,5 +94,6 @@ export function SettingsPage() {
         </div>
       </div>
     </div>
+    {passwordModal && <PasswordModal close={() => setPasswordModal(false)} updatePassword={updatePassword} hasPassword={user?.has_password !== false} />}
   </>;
 }

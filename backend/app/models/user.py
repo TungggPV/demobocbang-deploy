@@ -38,6 +38,11 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     created_share_links: Mapped[list[ShareLink]] = relationship(back_populates="created_by_user")
 
+    @property
+    def has_password(self) -> bool:
+        """Expose password availability without ever returning the password hash."""
+        return self.password_hash is not None
+
 
 class EmailOtp(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "email_otps"

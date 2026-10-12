@@ -7,7 +7,8 @@ import type { AuthSession, User } from "../types/domain";
 type AuthContextValue = {
   user: User | null; ready: boolean; login(email: string, password: string): Promise<void>;
   register(email: string, password: string, name: string): Promise<void>; verifyOtp(email: string, code: string): Promise<void>;
-  logout(): Promise<void>; googleLogin(): Promise<void>; updateProfile(fullName: string): Promise<void>; accessToken: string | null;
+  logout(): Promise<void>; googleLogin(): Promise<void>; updateProfile(fullName: string): Promise<void>;
+  updatePassword(currentPassword: string | undefined, newPassword: string): Promise<void>; accessToken: string | null;
 };
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 const KEY = "bocbang.session";
@@ -49,7 +50,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<AuthSession | null>(readSession);
   const sessionRef = useRef(session);
   const [oauthRefreshToken] = useState<string | null>(consumeOAuthRefreshToken);
-  const [ready, setReady] = useState(!oauthRefreshToken);
+  const [ready, setReady] = useState(!oauthRefreshToken && (!session || session.user.has_password !== undefined));
   const persist = useCallback((next: AuthSession | null) => {
     sessionRef.current = next;
     setSession(next);
@@ -77,7 +78,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener("storage", syncSession);
     return () => window.removeEventListener("storage", syncSession);
   }, []);
-  useEffect(() => { if (oauthRefreshToken) void authApi.refresh(oauthRefreshToken).then((next) => { persist(next); const target = sessionStorage.getItem("bocbang.auth.next"); if (target?.startsWith("/") && !target.startsWith("//")) { sessionStorage.removeItem("bocbang.auth.next"); window.location.assign(target); } }).catch(() => persist(null)).finally(() => setReady(true)); }, [oauthRefreshToken, persist]);
+  useEffect(() => {
+    if (oauthRefreshToken || !sessionRef.current || sessionRef.current.user.has_password !== undefined) return;
+    const current = sessionRef.current;
+    const hydrate = current.refresh_token
+      ? authApi.refresh(current.refresh_token).then(persist)
+      : authApi.me().then((user) => persist({ ...current, user }));
+    void hydrate.catch(() => undefined).finally(() => setReady(true));
+  }, [oauthRefreshToken, persist]);
+  useEffect(() => {
+    if (!oauthRefreshToken) return;
+    void authApi.refresh(oauthRefreshToken).then((next) => {
+      persist(next);
+      const storedTarget = sessionStorage.getItem("bocbang.auth.next");
+      const target = storedTarget?.startsWith("/") && !storedTarget.startsWith("//") ? storedTarget : "/meetings";
+      sessionStorage.removeItem("bocbang.auth.next");
+      const destination = next.user.has_password === false
+        ? `/set-password?next=${encodeURIComponent(target)}`
+        : target;
+      window.location.assign(destination);
+    }).catch(() => persist(null)).finally(() => setReady(true));
+  }, [oauthRefreshToken, persist]);
   // Configure during render so child effects cannot issue an unauthenticated
   // request before this provider's useEffect has run.
   configureApiAuth(() => sessionRef.current?.access_token ?? null, refresh);
@@ -88,6 +109,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     verifyOtp: async (email, code) => persist(await authApi.verifyOtp(email, code)),
     logout: async () => { try { await authApi.logout(); } finally { persist(null); } },
     updateProfile: async (fullName) => { if (!sessionRef.current) return; const user = await authApi.updateProfile(fullName); persist({ ...sessionRef.current, user }); },
+    updatePassword: async (currentPassword, newPassword) => { if (!sessionRef.current) return; const user = await authApi.updatePassword(currentPassword, newPassword); persist({ ...sessionRef.current, user }); },
     googleLogin: async () => {
       window.location.assign(`${config.apiBaseUrl}${authApi.googleUrl()}`);
     },

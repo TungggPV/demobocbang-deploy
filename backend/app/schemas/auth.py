@@ -20,6 +20,7 @@ class UserResponse(BaseModel):
     full_name: str
     avatar_url: str | None = None
     is_email_verified: bool
+    has_password: bool
 
 
 class UserUpdateRequest(BaseModel):
@@ -32,6 +33,11 @@ class UserUpdateRequest(BaseModel):
         if not normalized:
             raise ValueError("Full name is required.")
         return normalized
+
+
+class PasswordUpdateRequest(BaseModel):
+    current_password: str | None = Field(default=None, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 class RegisterRequest(BaseModel):

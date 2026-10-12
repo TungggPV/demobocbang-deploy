@@ -762,11 +762,15 @@ a.meeting-row:hover { background: var(--surface-hover); }
    MEETING PAGE
 ═══════════════════════════════════════════ */
 .meeting-layout {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
   gap: 18px;
   align-items: start;
 }
+.meeting-layout > section, .meeting-side, .transcript-list, .segment, .segment-content { min-width: 0; max-width: 100%; }
 .meeting-side { position: sticky; top: 76px; }
 .meeting-tabs {
   display: flex;
@@ -892,13 +896,13 @@ a.meeting-row:hover { background: var(--surface-hover); }
 .segment.is-merge-selected .inline-actions { opacity: 1; transform: none; }
 .merge-selected-badge { width: fit-content; display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 999px; background: var(--accent); color: white; font-size: 10px; font-weight: 800; }
 .merge-selected-badge .icon { width: 12px; height: 12px; }
-.merge-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 10px; padding: 12px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 10px; background: var(--accent-soft); color: var(--accent-text); font-size: 13px; }
-.merge-toolbar-summary { min-width: 0; display: grid; gap: 8px; }
+.merge-toolbar { width: 100%; min-width: 0; max-width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 14px; overflow: hidden; margin-bottom: 10px; padding: 12px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 10px; background: var(--accent-soft); color: var(--accent-text); font-size: 13px; }
+.merge-toolbar-summary { min-width: 0; max-width: 100%; display: grid; gap: 8px; }
 .merge-toolbar-summary > strong { font-weight: 800; }
-.merge-selection-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.merge-selection-list button { max-width: 210px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 7px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 7px; background: var(--surface); color: var(--secondary); cursor: pointer; }
+.merge-selection-list { min-width: 0; max-width: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+.merge-selection-list button { min-width: 0; max-width: 210px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 7px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 7px; background: var(--surface); color: var(--secondary); cursor: pointer; }
 .merge-selection-list button b { width: 18px; height: 18px; display: grid; place-items: center; flex: none; border-radius: 5px; background: var(--accent); color: white; font-size: 10px; }
-.merge-selection-list button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.merge-selection-list button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .merge-selection-list button .icon { width: 12px; height: 12px; flex: none; }
 .merge-toolbar-actions { display: flex; flex: none; gap: 7px; }
 .split-text { margin-bottom: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 16px; line-height: 1.8; cursor: pointer; user-select: none; }
@@ -1483,8 +1487,10 @@ a.meeting-row:hover { background: var(--surface-hover); }
   .auth-card form.register-form .btn { grid-column: auto; }
   .share-attachment-options { grid-template-columns: 1fr; }
   .merge-toolbar { align-items: stretch; flex-direction: column; }
-  .merge-toolbar-actions { width: 100%; }
-  .merge-toolbar-actions .btn { flex: 1; }
+  .merge-selection-list { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); }
+  .merge-selection-list button { width: 100%; max-width: 100%; }
+  .merge-toolbar-actions { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .merge-toolbar-actions .btn { width: 100%; min-width: 0; padding-inline: 8px; }
   .comment-main header { align-items: flex-start; flex-direction: column; gap: 3px; }
   .comment-actions { opacity: 1; }
   .setting-row { align-items: flex-start; flex-wrap: wrap; gap: 12px; padding: 16px; }

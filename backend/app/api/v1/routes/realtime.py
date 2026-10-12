@@ -563,6 +563,8 @@ async def _emit_events(
             )
             payload["start_ms"] = segment.start_ms
             payload["end_ms"] = segment.end_ms
+            payload["text"] = segment.text
+            payload["confidence"] = segment.confidence
             payload["logical_segment_id"] = str(logical_segment_id)
         if send_client:
             await send_json({key: value for key, value in payload.items() if value is not None})

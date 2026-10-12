@@ -76,6 +76,9 @@ class AssemblyAIProvider:
                 "audio_url": upload_url,
                 "speech_models": models,
                 "speaker_labels": options.diarization,
+                "punctuate": True,
+                "format_text": True,
+                "disfluencies": False,
             }
             if options.language == "auto":
                 # Universal-3.5 Pro natively handles code-switching. Steering it
@@ -175,6 +178,7 @@ class AssemblyAIStream:
                 "encoding": options.audio_format or "pcm_s16le",
                 "speech_model": streaming_model,
                 "mode": streaming_mode,
+                "format_turns": "true",
                 # language_codes steers decoding; language_detection asks the
                 # provider to report the detected language on each final turn.
                 "language_codes": json.dumps(language_codes, ensure_ascii=False),

@@ -5,7 +5,7 @@ export type SummaryTemplate = "general" | "briefing" | "voting";
 export type SummaryLanguage = "vi" | "en";
 export type ExportFormat = "pdf" | "docx" | "txt" | "srt" | "vtt" | "json";
 
-export interface User { id: string; email: string; full_name: string; avatar_url?: string | null; is_email_verified: boolean }
+export interface User { id: string; email: string; full_name: string; avatar_url?: string | null; is_email_verified: boolean; has_password?: boolean }
 export interface AuthSession { access_token: string; refresh_token?: string; user: User }
 export interface Meeting {
   id: string; title: string; description?: string; status: MeetingStatus; permission: Permission;

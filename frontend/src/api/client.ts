@@ -20,7 +20,7 @@ function refreshAccessToken(): Promise<boolean> {
 async function request<T>(path: string, init: RequestInit = {}, retry = true, responseType: "json" | "blob" = "json"): Promise<T> {
   // Auth endpoints must not try to refresh themselves. Otherwise an expired
   // refresh token can recursively call /auth/refresh after its own 401.
-  const isPublicAuthRequest = path.startsWith("/auth/") && path !== "/auth/me";
+  const isPublicAuthRequest = path.startsWith("/auth/") && !path.startsWith("/auth/me");
   const token = isPublicAuthRequest ? null : getAccessToken();
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);

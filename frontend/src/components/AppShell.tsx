@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { ReactNode } from "react";
 import { useAuth } from "../auth/AuthContext";
+import { PasswordModal } from "./PasswordModal";
 import { ThemeToggle } from "./ThemeToggle";
 import { Icon, type IconName, Button } from "./ui";
 
@@ -9,7 +10,7 @@ const primaryNav: Array<[string, IconName, string]> = [
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { user, logout, updateProfile } = useAuth();
+  const { user, logout, updateProfile, updatePassword } = useAuth();
   const path = window.location.pathname;
   const meetingMatch = path.match(/^\/meetings\/([^/]+)/)?.[1];
   const meetingId = meetingMatch === "create" ? undefined : meetingMatch;
@@ -163,10 +164,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     <ThemeToggle className="shell-theme-toggle" />
 
     {profileModal && <ProfileModal close={() => setProfileModal(false)} user={user} updateProfile={updateProfile} />}
-    {passwordModal && <PasswordModal close={() => setPasswordModal(false)} />}
+    {passwordModal && <PasswordModal close={() => setPasswordModal(false)} updatePassword={updatePassword} hasPassword={user?.has_password !== false} />}
   </div>;
 }
-
 function ProfileModal({ close, user, updateProfile }: { close: () => void, user: any, updateProfile: (name: string) => Promise<void> }) {
   const [fullName, setFullName] = useState(user?.full_name ?? "");
   const [saving, setSaving] = useState(false);
@@ -209,110 +209,6 @@ function ProfileModal({ close, user, updateProfile }: { close: () => void, user:
             </Button>
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function PasswordModal({ close }: { close: () => void }) {
-  const [current, setCurrent] = useState("");
-  const [newPass, setNewPass] = useState("");
-  const [confirm, setConfirm] = useState("");
-  
-  const [showCurrent, setShowCurrent] = useState(false);
-  const [showNew, setShowNew] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-  
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState(false);
-
-  async function save() {
-    if (!current) return setError("Vui lòng nhập mật khẩu hiện tại.");
-    if (newPass.length < 8) return setError("Mật khẩu mới phải có ít nhất 8 ký tự.");
-    if (newPass !== confirm) return setError("Mật khẩu xác nhận không khớp.");
-    
-    setSaving(true);
-    setError("");
-    
-    // Simulate API call since change password isn't in the API yet
-    try {
-      await new Promise(resolve => setTimeout(resolve, 800));
-      setSuccess(true);
-      setTimeout(close, 2000);
-    } catch (cause) {
-      setError("Đổi mật khẩu thất bại.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="dialog-backdrop">
-      <div className="dialog" style={{ width: 440 }}>
-        <button className="close" aria-label="Đóng" onClick={close}><Icon name="close" /></button>
-        <h2>Đổi mật khẩu</h2>
-        <p>Bảo mật tài khoản của bạn bằng một mật khẩu mạnh.</p>
-        
-        {success ? (
-          <div className="notice" style={{ marginTop: 24 }}>Đổi mật khẩu thành công!</div>
-        ) : (
-          <div className="compact-form" style={{ marginTop: 24 }}>
-            <label className="field full">
-              Mật khẩu hiện tại
-              <div className="input-group">
-                <input 
-                  type={showCurrent ? "text" : "password"} 
-                  value={current} 
-                  onChange={(e) => setCurrent(e.target.value)} 
-                  placeholder="Nhập mật khẩu hiện tại" 
-                />
-                <button type="button" className="btn-icon" onClick={() => setShowCurrent(!showCurrent)}>
-                  <Icon name={showCurrent ? "eye-off" : "eye"} />
-                </button>
-              </div>
-            </label>
-            <label className="field full">
-              Mật khẩu mới
-              <div className="input-group">
-                <input 
-                  type={showNew ? "text" : "password"} 
-                  value={newPass} 
-                  onChange={(e) => setNewPass(e.target.value)} 
-                  placeholder="Tối thiểu 8 ký tự" 
-                  minLength={8}
-                />
-                <button type="button" className="btn-icon" onClick={() => setShowNew(!showNew)}>
-                  <Icon name={showNew ? "eye-off" : "eye"} />
-                </button>
-              </div>
-            </label>
-            <label className="field full">
-              Nhập lại mật khẩu mới
-              <div className="input-group">
-                <input 
-                  type={showConfirm ? "text" : "password"} 
-                  value={confirm} 
-                  onChange={(e) => setConfirm(e.target.value)} 
-                  placeholder="Nhập lại mật khẩu mới" 
-                  minLength={8}
-                />
-                <button type="button" className="btn-icon" onClick={() => setShowConfirm(!showConfirm)}>
-                  <Icon name={showConfirm ? "eye-off" : "eye"} />
-                </button>
-              </div>
-            </label>
-            
-            {error && <div className="form-error">{error}</div>}
-            
-            <div className="form-actions" style={{ marginTop: 24 }}>
-              <Button className="btn-ghost" onClick={close}>Hủy</Button>
-              <Button tone="dark" disabled={saving} onClick={() => void save()}>
-                {saving ? "Đang xử lý…" : "Cập nhật mật khẩu"}
-              </Button>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

@@ -176,7 +176,7 @@ def test_realtime_persists_finals_but_never_partials_and_handles_pause_resume(
             assert websocket.receive_json()["type"] == "transcript.partial"
             final = websocket.receive_json()
             assert final["type"] == "transcript.final"
-            assert final["text"] == "Bản cuối được lưu"
+            assert final["text"] == "Bản cuối được lưu."
             websocket.send_text('{"type":"recording.stop"}')
             assert websocket.receive_json() == {"type": "meeting.status", "status": "completed"}
 
@@ -212,7 +212,7 @@ def test_realtime_persists_finals_but_never_partials_and_handles_pause_resume(
         await engine.dispose()
         assert len(versions) == 1
         assert len(segments) == 1
-        assert segments[0].text == "Bản cuối được lưu"
+        assert segments[0].text == "Bản cuối được lưu."
         assert meeting.status == "completed"
 
     asyncio.run(verify())
@@ -540,14 +540,14 @@ def test_realtime_translation_only_translates_final_segments(tmp_path: Path) -> 
                 "logical_segment_id": final["logical_segment_id"],
                 "source_language": "vi",
                 "target_language": "en",
-                "text": "Translated: Bản cuối được lưu",
+                "text": "Translated: Bản cuối được lưu.",
             }
             websocket.send_text('{"type":"recording.stop"}')
             assert websocket.receive_json() == {"type": "meeting.status", "status": "completed"}
 
     assert len(translation.calls) == 1
     segments, source, target = translation.calls[0]
-    assert [item.text for item in segments] == ["Bản cuối được lưu"]
+    assert [item.text for item in segments] == ["Bản cuối được lưu."]
     assert (source, target) == ("vi", "en")
 
 

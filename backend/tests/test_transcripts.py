@@ -208,7 +208,7 @@ def test_replace_stt_batch_replaces_existing_projection(tmp_path: Path) -> None:
                     .where(CurrentSegment.transcript_id == transcript.id)
                     .order_by(CurrentSegment.position)
                 ))
-                assert [item.text for item in current] == ["Xin chào", "Việt Nam"]
+                assert [item.text for item in current] == ["Xin chào.", "Việt Nam."]
                 assert [item.position for item in current] == [Decimal(1024), Decimal(2048)]
             await engine.dispose()
 

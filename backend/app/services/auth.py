@@ -100,6 +100,24 @@ class AuthService:
         await self._session.refresh(user)
         return user
 
+    async def update_password(
+        self, user: User, current_password: str | None, new_password: str
+    ) -> User:
+        """Set a first password for OAuth users or change an existing password."""
+        if user.password_hash is not None and (
+            current_password is None
+            or not verify_secret(current_password, user.password_hash)
+        ):
+            raise ApiError(
+                "CURRENT_PASSWORD_INVALID",
+                "Mật khẩu hiện tại không đúng.",
+                400,
+            )
+        user.password_hash = hash_secret(new_password)
+        await self._session.commit()
+        await self._session.refresh(user)
+        return user
+
     async def google_user(self, subject: str, email: str, full_name: str, avatar_url: str | None = None) -> User:
         user = await self._session.scalar(select(User).where(User.google_subject == subject))
         if user is None:
