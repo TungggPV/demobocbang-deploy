@@ -69,6 +69,7 @@ class MediaProcessingWorker:
                     BatchTranscriptionOptions(
                         language=meeting.language_mode,
                         diarization=meeting.diarization_enabled,
+                        expected_speakers=meeting.expected_speaker_count,
                         context=". ".join(
                             item.strip()
                             for item in (meeting.title, meeting.description or "")

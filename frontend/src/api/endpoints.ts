@@ -32,8 +32,8 @@ export const authApi = {
 export const meetingsApi = {
   list: (page?: Page, signal?: AbortSignal) => apiClient.get<Meeting[]>(`/meetings${pageQuery(page)}`, { signal }),
   get: (id: string) => apiClient.get<Meeting>(`/meetings/${id}`),
-  create: (body: Pick<Meeting, "title" | "description" | "source_type" | "language_mode" | "diarization_enabled">) => apiClient.post<Meeting>("/meetings", body),
-  update: (id: string, body: Partial<Pick<Meeting, "title" | "description" | "language_mode" | "diarization_enabled">>) => apiClient.patch<Meeting>(`/meetings/${id}`, body),
+  create: (body: Pick<Meeting, "title" | "description" | "source_type" | "language_mode" | "diarization_enabled" | "expected_speaker_count">) => apiClient.post<Meeting>("/meetings", body),
+  update: (id: string, body: Partial<Pick<Meeting, "title" | "description" | "language_mode" | "diarization_enabled" | "expected_speaker_count">>) => apiClient.patch<Meeting>(`/meetings/${id}`, body),
   complete: (id: string) => apiClient.post<Meeting>(`/meetings/${id}/complete`),
   remove: (id: string) => apiClient.delete<void>(`/meetings/${id}`),
   uploadMedia: (id: string, file: File) => { const data = new FormData(); data.append("file", file); return apiClient.post<Job>(`/meetings/${id}/media`, data); },

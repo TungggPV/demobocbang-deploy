@@ -93,7 +93,19 @@ class MeetingService:
         self, meeting_id: UUID, user: User, payload: MeetingUpdateRequest
     ) -> MeetingResponse:
         meeting, permission = await self.require_access(meeting_id, user, MeetingPermission.EDIT)
-        for field, value in payload.model_dump(exclude_unset=True).items():
+        changes = payload.model_dump(exclude_unset=True)
+        if changes.get("diarization_enabled") is False:
+            changes["expected_speaker_count"] = None
+        if (
+            changes.get("expected_speaker_count") is not None
+            and not changes.get("diarization_enabled", meeting.diarization_enabled)
+        ):
+            raise ApiError(
+                "DIARIZATION_REQUIRED",
+                "Expected speaker count requires speaker diarization.",
+                422,
+            )
+        for field, value in changes.items():
             setattr(meeting, field, value)
         await self._session.commit()
         await self._session.refresh(meeting)
@@ -398,6 +410,7 @@ class MeetingService:
             source_type=meeting.source_type,
             language_mode=meeting.language_mode,
             diarization_enabled=meeting.diarization_enabled,
+            expected_speaker_count=meeting.expected_speaker_count,
             status=meeting.status,
             duration_ms=meeting.duration_ms,
             created_at=meeting.created_at,

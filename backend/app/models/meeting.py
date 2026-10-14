@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, BigInteger, DateTime, ForeignKey, Index, String, Text, desc
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, desc
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -44,6 +44,7 @@ class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     language_mode: Mapped[str] = mapped_column(String(35), nullable=False)
     diarization_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    expected_speaker_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[MeetingStatus] = mapped_column(
         domain_enum(MeetingStatus, "meeting_status"),
         nullable=False,

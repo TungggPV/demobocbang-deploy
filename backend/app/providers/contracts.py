@@ -37,6 +37,7 @@ class BatchTranscriptionOptions:
 
     language: str
     diarization: bool
+    expected_speakers: int | None = None
     context: str | None = None
     keyterms: tuple[str, ...] = ()
 
@@ -47,6 +48,7 @@ class StreamingOptions:
 
     language: str
     diarization: bool
+    expected_speakers: int | None = None
     audio_format: str | None = None
     context: str | None = None
     keyterms: tuple[str, ...] = ()

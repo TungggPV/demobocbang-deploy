@@ -108,6 +108,7 @@ function CreateMeeting({ initialSource }: { initialSource?: "realtime" | "upload
   const [description, setDescription] = useState("");
   const [language, setLanguage] = useState("vi");
   const [diarization, setDiarization] = useState(true);
+  const [expectedSpeakers, setExpectedSpeakers] = useState("");
   const [creating, setCreating] = useState<"realtime" | "upload">();
   const [error, setError] = useState("");
 
@@ -122,6 +123,7 @@ function CreateMeeting({ initialSource }: { initialSource?: "realtime" | "upload
         source_type: sourceType,
         language_mode: language,
         diarization_enabled: diarization,
+        expected_speaker_count: diarization && expectedSpeakers ? Number(expectedSpeakers) : null,
       });
       window.location.assign(sourceType === "realtime" ? `/meetings/${meeting.id}` : `/meetings/${meeting.id}/upload`);
     } catch (cause) {
@@ -139,6 +141,7 @@ function CreateMeeting({ initialSource }: { initialSource?: "realtime" | "upload
       <div className="field-grid">
         <label className="field">Ngôn ngữ<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="vi">Tiếng Việt</option><option value="en">English</option><option value="auto">Tự nhận diện Việt / Anh</option></select></label>
         <label className="field">Người nói<select value={String(diarization)} onChange={(event) => setDiarization(event.target.value === "true")}><option value="true">Tự phân biệt</option><option value="false">Không phân biệt</option></select></label>
+        {diarization && <label className="field full">Số người nói dự kiến<select value={expectedSpeakers} onChange={(event) => setExpectedSpeakers(event.target.value)}><option value="">Tự động</option>{Array.from({ length: 9 }, (_, index) => index + 2).map((count) => <option key={count} value={count}>{count} người</option>)}</select><span>Chọn đúng số người để nhận diện ổn định hơn.</span></label>}
       </div>
       {error && <div className="form-error">{error}</div>}
       <div className="form-actions">

@@ -81,12 +81,13 @@ class RealtimeTranscriptService:
         if logical_id is None:
             return None
         stored = await self._session.scalar(
-            select(SegmentVersion).where(SegmentVersion.logical_segment_id == logical_id)
+            select(SegmentVersion).where(
+                SegmentVersion.logical_segment_id == logical_id,
+                SegmentVersion.transcript_version_id
+                == self._meeting.current_transcript_version_id,
+            )
         )
-        if (
-            stored is None
-            or stored.transcript_version_id != self._meeting.current_transcript_version_id
-        ):
+        if stored is None:
             return None
         await TranscriptService(self._session).revise_stt_speaker(
             self._meeting, stored, speaker_label

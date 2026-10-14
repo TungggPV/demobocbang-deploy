@@ -10,7 +10,8 @@ export interface AuthSession { access_token: string; refresh_token?: string; use
 export interface Meeting {
   id: string; title: string; description?: string; status: MeetingStatus; permission: Permission;
   owner_id: string; source_type: "realtime" | "upload"; language_mode: string;
-  diarization_enabled: boolean; duration_ms?: number; created_at: string; updated_at: string;
+  diarization_enabled: boolean; expected_speaker_count?: number | null;
+  duration_ms?: number; created_at: string; updated_at: string;
 }
 export interface MediaFile { id: string; original_filename: string; size_bytes: number; duration_ms?: number; status: string }
 export interface SpeakerSample { media_id: string; start_ms: number; end_ms: number }

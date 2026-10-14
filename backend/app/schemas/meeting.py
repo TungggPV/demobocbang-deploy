@@ -21,6 +21,7 @@ class MeetingCreateRequest(BaseModel):
     source_type: MeetingSourceType
     language_mode: str = Field(min_length=1, max_length=35)
     diarization_enabled: bool = False
+    expected_speaker_count: int | None = Field(default=None, ge=2, le=10)
 
     @field_validator("title", "language_mode")
     @classmethod
@@ -38,12 +39,19 @@ class MeetingCreateRequest(BaseModel):
         value = value.strip()
         return value or None
 
+    @model_validator(mode="after")
+    def require_diarization_for_speaker_count(self) -> "MeetingCreateRequest":
+        if not self.diarization_enabled and self.expected_speaker_count is not None:
+            raise ValueError("Expected speaker count requires diarization.")
+        return self
+
 
 class MeetingUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=20_000)
     language_mode: str | None = Field(default=None, min_length=1, max_length=35)
     diarization_enabled: bool | None = None
+    expected_speaker_count: int | None = Field(default=None, ge=2, le=10)
 
     @field_validator("title", "language_mode")
     @classmethod
@@ -64,6 +72,8 @@ class MeetingUpdateRequest(BaseModel):
     def require_change(self) -> "MeetingUpdateRequest":
         if not self.model_fields_set:
             raise ValueError("At least one field must be provided.")
+        if self.diarization_enabled is False and self.expected_speaker_count is not None:
+            raise ValueError("Expected speaker count requires diarization.")
         return self
 
 
@@ -77,6 +87,7 @@ class MeetingResponse(BaseModel):
     source_type: MeetingSourceType
     language_mode: str
     diarization_enabled: bool
+    expected_speaker_count: int | None
     status: MeetingStatus
     duration_ms: int | None
     created_at: datetime

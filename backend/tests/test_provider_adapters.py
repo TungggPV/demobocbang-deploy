@@ -156,7 +156,10 @@ def test_assemblyai_batch_auto_detect_is_limited_to_vietnamese_and_english(
         provider.transcribe_file(
             source,
             BatchTranscriptionOptions(
-                language="auto", diarization=True, context="Bilingual meeting"
+                language="auto",
+                diarization=True,
+                expected_speakers=3,
+                context="Bilingual meeting",
             ),
         )
     )
@@ -165,6 +168,7 @@ def test_assemblyai_batch_auto_detect_is_limited_to_vietnamese_and_english(
     assert isinstance(request, dict)
     assert "language_code" not in request
     assert request["language_codes"] == ["vi", "en"]
+    assert request["speakers_expected"] == 3
     assert "language_detection" not in request
     assert "language_detection_options" not in request
     assert result.language == "en"
@@ -332,6 +336,7 @@ def test_assemblyai_stream_uses_configured_model_waits_for_begin_and_termination
             StreamingOptions(
                 language="vi",
                 diarization=True,
+                expected_speakers=3,
                 keyterms=("Bóc Băng", "Bóc Băng"),
             ),
         )
@@ -344,6 +349,8 @@ def test_assemblyai_stream_uses_configured_model_waits_for_begin_and_termination
         assert "language_code" not in query
         assert query["encoding"] == ["pcm_s16le"]
         assert query["speaker_labels"] == ["true"]
+        assert query["speaker_labels_revision_interval_ms"] == ["300000"]
+        assert query["max_speakers"] == ["3"]
         assert query["min_turn_silence"] == ["800"]
         assert query["max_turn_silence"] == ["2400"]
         assert "Bóc Băng" in query["keyterms_prompt"][0]
@@ -427,6 +434,8 @@ def test_assemblyai_stream_auto_detects_each_vietnamese_or_english_turn(
         assert query["language_codes"] == ['["vi", "en"]']
         assert query["language_detection"] == ["true"]
         assert query["speaker_labels"] == ["true"]
+        assert query["speaker_labels_revision_interval_ms"] == ["300000"]
+        assert "max_speakers" not in query
         assert "language_code" not in query
         assert query["min_turn_silence"] == ["800"]
         assert query["max_turn_silence"] == ["2400"]

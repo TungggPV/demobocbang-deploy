@@ -104,6 +104,8 @@ class AssemblyAIProvider:
                 "format_text": True,
                 "disfluencies": False,
             }
+            if options.diarization and options.expected_speakers is not None:
+                request["speakers_expected"] = options.expected_speakers
             if options.language == "auto":
                 # Universal-3.5 Pro natively handles code-switching. Steering it
                 # toward the two languages exposed by the product is more
@@ -213,6 +215,11 @@ class AssemblyAIStream:
             }
             if options.diarization:
                 params["speaker_labels"] = "true"
+                # Re-evaluate labels during long sessions and once again when
+                # the stream terminates, instead of keeping the first guess.
+                params["speaker_labels_revision_interval_ms"] = 300_000
+                if options.expected_speakers is not None:
+                    params["max_speakers"] = options.expected_speakers
             prompt = _transcription_prompt(language, options.context)
             if prompt:
                 params["prompt"] = prompt

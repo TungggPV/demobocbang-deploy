@@ -67,6 +67,7 @@ def test_meeting_crud_and_collaborator_acl(tmp_path: Path) -> None:
                 "source_type": "upload",
                 "language_mode": "vi",
                 "diarization_enabled": True,
+                "expected_speaker_count": 3,
             },
         )
         assert created.status_code == 201
@@ -75,6 +76,20 @@ def test_meeting_crud_and_collaborator_acl(tmp_path: Path) -> None:
         meeting_id = meeting["id"]
         assert meeting["permission"] == "owner"
         assert meeting["status"] == "recording"
+        assert meeting["expected_speaker_count"] == 3
+
+        invalid_speaker_count = client.post(
+            "/api/v1/meetings",
+            headers=owner_headers,
+            json={
+                "title": "Invalid diarization settings",
+                "source_type": "upload",
+                "language_mode": "vi",
+                "diarization_enabled": False,
+                "expected_speaker_count": 2,
+            },
+        )
+        assert invalid_speaker_count.status_code == 422
 
         forbidden = client.get(f"/api/v1/meetings/{meeting_id}", headers=outsider_headers)
         assert forbidden.status_code == 403
