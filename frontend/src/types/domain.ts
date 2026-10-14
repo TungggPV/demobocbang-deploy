@@ -28,7 +28,20 @@ export interface TranslationSegment { logical_segment_id: string; text: string }
 export interface Translation { id: string; source_language: string; target_language: string; segments: TranslationSegment[]; created_at: string }
 export interface SummaryVersion { version_no: number; content: Record<string, unknown>; created_at: string }
 export interface Summary { id: string; template: SummaryTemplate; output_language: SummaryLanguage; current_version: SummaryVersion }
-export interface Comment { id: string; parent_comment_id?: string | null; author_user_id: string; author_name?: string; segment_id?: string | null; content: string; created_at: string }
+export interface Comment {
+  id: string;
+  parent_comment_id?: string | null;
+  author_user_id?: string;
+  author_id?: string;
+  author_name?: string;
+  author_avatar_url?: string;
+  segment_id?: string | null;
+  segment_logical_id?: string | null;
+  content?: string;
+  body?: string;
+  created_at: string;
+  updated_at?: string;
+}
 export interface ShareLink { id: string; token: string; permission: Exclude<Permission, "owner">; expires_at?: string }
 export interface CreatedShareLink extends ShareLink { share_url: string }
 export interface ExportArtifact { id: string; format: ExportFormat; filename?: string; status: JobStatus; job_id?: string }

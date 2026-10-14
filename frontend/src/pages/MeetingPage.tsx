@@ -450,9 +450,32 @@ function ShareDialog({ meetingId, close }: { meetingId: string; close: () => voi
   const [message, setMessage] = useState("");
   const [success, setSuccess] = useState(false);
   const [sending, setSending] = useState(false);
+  const [shareLink, setShareLink] = useState("");
+  const [copyNotice, setCopyNotice] = useState(false);
+
+  useEffect(() => {
+    meetingsApi.createShare(meetingId, permission).then((res) => {
+      setShareLink(`${window.location.origin}/share/${res.token}`);
+    }).catch(() => {});
+  }, [meetingId, permission]);
+
   function toggleAttachment(value: EmailAttachmentChoice) {
     setAttachments((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
   }
+
+  async function copyLink() {
+    if (!shareLink) return;
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      setCopyNotice(true);
+      window.setTimeout(() => setCopyNotice(false), 2500);
+    } catch {
+      setMessage("Không thể sao chép liên kết.");
+    }
+  }
+
+  const mailtoHref = shareLink ? `mailto:${encodeURIComponent(email.trim())}?subject=${encodeURIComponent("Mời tham gia cuộc họp trên Bóc Băng")}&body=${encodeURIComponent("Xin chào,\n\nTôi mời bạn tham gia và xem nội dung cuộc họp tại liên kết sau:\n" + shareLink + "\n\nTrân trọng!")}` : "";
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!email.trim()) return;
@@ -461,16 +484,84 @@ function ShareDialog({ meetingId, close }: { meetingId: string; close: () => voi
       setMessage("");
       await meetingsApi.addMember(meetingId, email.trim(), permission, attachments);
       setSuccess(true);
-      setMessage(`Đã gửi lời mời${attachments.length ? ` cùng ${attachments.length} tệp đính kèm` : ""} qua email.`);
+      setMessage(`Đã cấp quyền truy cập thành công cho ${email.trim()}.`);
       setEmail("");
     } catch (cause) {
       setSuccess(false);
-      setMessage(meetingErrorMessage(cause));
+      const errMsg = (cause as Error)?.message || "";
+      if (errMsg.includes("No user exists") || errMsg.includes("USER_NOT_FOUND")) {
+        setMessage(`Email “${email.trim()}” chưa có tài khoản trên hệ thống. Bạn có thể sao chép liên kết chia sẻ bên dưới để gửi trực tiếp cho họ qua Email nhé!`);
+      } else {
+        setMessage(meetingErrorMessage(cause));
+      }
     } finally {
       setSending(false);
     }
   }
-  return <div className="dialog-backdrop"><section className="dialog" role="dialog" aria-modal="true" style={{ width: 520 }}><button className="close" onClick={close} type="button">×</button><h2>Chia sẻ cuộc họp</h2><p>Mời thành viên qua email và cấp quyền truy cập.</p><form onSubmit={submit}><label className="field">Email người nhận<input required type="email" placeholder="dongnghiep@congty.com" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label className="field">Quyền hạn<select value={permission} onChange={(event) => setPermission(event.target.value as typeof permission)}><option value="read">Xem (Chỉ đọc)</option><option value="comment">Bình luận</option><option value="edit">Chỉnh sửa</option></select></label><div className="field"><span>Tệp đính kèm gửi qua email</span><div className="share-attachment-options">{choices.map((item) => <label key={item.value} className="checkbox-row"><input type="checkbox" checked={attachments.includes(item.value)} onChange={() => toggleAttachment(item.value)} /><div><strong>{item.label}</strong><small>{item.detail}</small></div></label>)}</div></div>{message && <div className={success ? "notice" : "form-error"}>{message}</div>}<div className="dialog-actions"><Button onClick={close}>Đóng</Button><Button type="submit" tone="dark" disabled={sending}>{sending ? "Đang gửi…" : "Gửi lời mời"}</Button></div></form></section></div>;
+
+  return (
+    <div className="dialog-backdrop">
+      <section className="dialog" role="dialog" aria-modal="true" style={{ width: 540, maxWidth: "94vw" }}>
+        <button className="close" onClick={close} type="button">×</button>
+        <h2>Chia sẻ cuộc họp</h2>
+        <p>Tạo liên kết chia sẻ hoặc mời thành viên qua email.</p>
+
+        {shareLink && (
+          <div style={{ background: "var(--card-bg, #1a1e28)", padding: 12, borderRadius: 10, border: "1px solid var(--border)", marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <strong style={{ fontSize: 13 }}>Liên kết chia sẻ trực tiếp ({permission === "read" ? "Chỉ xem" : permission === "comment" ? "Xem & bình luận" : "Chỉnh sửa"})</strong>
+              {copyNotice && <span style={{ fontSize: 12, color: "var(--accent, #10b981)" }}>✓ Đã sao chép</span>}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input readOnly value={shareLink} style={{ flex: 1, fontSize: 12, padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)" }} />
+              <Button onClick={() => void copyLink()} tone="dark">Sao chép</Button>
+            </div>
+          </div>
+        )}
+
+        <form onSubmit={submit}>
+          <label className="field">
+            Email người nhận
+            <input required type="email" placeholder="dongnghiep@congty.com" value={email} onChange={(event) => setEmail(event.target.value)} />
+          </label>
+          <label className="field">
+            Quyền hạn
+            <select value={permission} onChange={(event) => setPermission(event.target.value as typeof permission)}>
+              <option value="read">Xem (Chỉ đọc)</option>
+              <option value="comment">Bình luận</option>
+              <option value="edit">Chỉnh sửa</option>
+            </select>
+          </label>
+          <div className="field">
+            <span>Tệp đính kèm gửi qua email</span>
+            <div className="share-attachment-options">
+              {choices.map((item) => (
+                <label key={item.value} className="checkbox-row">
+                  <input type="checkbox" checked={attachments.includes(item.value)} onChange={() => toggleAttachment(item.value)} />
+                  <div>
+                    <strong>{item.label}</strong>
+                    <small>{item.detail}</small>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+          {message && <div className={success ? "notice" : "form-error"}>{message}</div>}
+          <div className="dialog-actions" style={{ flexWrap: "wrap", gap: 8 }}>
+            <Button onClick={close}>Đóng</Button>
+            {email.trim() && mailtoHref && (
+              <a className="btn btn-light" href={mailtoHref} target="_blank" rel="noopener noreferrer">
+                Mở ứng dụng Email
+              </a>
+            )}
+            <Button type="submit" tone="dark" disabled={sending}>
+              {sending ? "Đang xử lý…" : "Cấp quyền thành viên"}
+            </Button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
 }
 
 function CommentsPanel({ meetingId, canComment, owner, currentUserId, comments }: { meetingId: string; canComment: boolean; owner: boolean; currentUserId?: string; comments: { data?: Comment[]; setData: React.Dispatch<React.SetStateAction<Comment[] | undefined>>; loading: boolean; error?: Error; reload: () => Promise<void> } }) {
@@ -525,16 +616,21 @@ function CommentsPanel({ meetingId, canComment, owner, currentUserId, comments }
     {comments.error && <Failure error={comments.error} retry={comments.reload} />}
     {!comments.loading && !comments.error && !comments.data?.length && <p className="muted">Chưa có bình luận.</p>}
     <div className="comment-list">{comments.data?.map((comment) => {
-      const own = comment.author_user_id === currentUserId;
+      const own = (comment.author_user_id || comment.author_id) === currentUserId;
       const authorName = comment.author_name || (own ? "Bạn" : "Người dùng");
       const initials = authorName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase();
+      const text = comment.content || comment.body || "";
       return <article className="comment-card" key={comment.id}>
         <div className="comment-avatar" aria-hidden="true">
-          <span>{initials || "?"}</span>
+          {comment.author_avatar_url ? (
+            <img src={comment.author_avatar_url} alt="" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} referrerPolicy="no-referrer" />
+          ) : (
+            <span>{initials || "?"}</span>
+          )}
         </div>
         <div className="comment-main">
           <header><strong>{authorName}{own && <small>Bạn</small>}</strong><time dateTime={comment.created_at}>{new Date(comment.created_at).toLocaleString("vi-VN")}</time></header>
-          {editing?.id === comment.id ? <div className="comment-editor"><textarea aria-label="Sửa bình luận" value={editing.body} onChange={(event) => setEditing({ ...editing, body: event.target.value })} /><div><Button tone="dark" onClick={() => void update()}>Lưu</Button><Button onClick={() => setEditing(undefined)}>Hủy</Button></div></div> : <><p>{comment.content}</p><div className="comment-actions">{own && <Button onClick={() => setEditing({ id: comment.id, body: comment.content })}>Sửa</Button>}{(own || owner) && <Button tone="danger" onClick={() => void remove(comment.id)}>Xóa</Button>}</div></>}
+          {editing?.id === comment.id ? <div className="comment-editor"><textarea aria-label="Sửa bình luận" value={editing.body} onChange={(event) => setEditing({ ...editing, body: event.target.value })} /><div><Button tone="dark" onClick={() => void update()}>Lưu</Button><Button onClick={() => setEditing(undefined)}>Hủy</Button></div></div> : <><p>{text}</p><div className="comment-actions">{own && <Button onClick={() => setEditing({ id: comment.id, body: text })}>Sửa</Button>}{(own || owner) && <Button tone="danger" onClick={() => void remove(comment.id)}>Xóa</Button>}</div></>}
         </div>
       </article>;
     })}</div>

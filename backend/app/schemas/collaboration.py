@@ -38,9 +38,13 @@ class CommentUpdateRequest(BaseModel):
 class CommentResponse(BaseModel):
     id: UUID
     meeting_id: UUID
-    segment_logical_id: UUID | None
+    segment_logical_id: UUID | None = None
     author_id: UUID
+    author_user_id: UUID | None = None
+    author_name: str | None = None
+    author_avatar_url: str | None = None
     body: str
+    content: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -26,14 +26,16 @@ class CollaborationService:
         self, meeting_id: UUID, user: User, *, limit: int = 100, offset: int = 0
     ) -> list[CommentResponse]:
         await self._meetings.require_access(meeting_id, user, MeetingPermission.READ)
-        rows = await self._session.scalars(
-            select(Comment)
+        stmt = (
+            select(Comment, User)
+            .outerjoin(User, Comment.author_id == User.id)
             .where(Comment.meeting_id == meeting_id, Comment.deleted_at.is_(None))
             .order_by(Comment.created_at.asc())
             .offset(offset)
             .limit(limit)
         )
-        return [self._response(row) for row in rows]
+        rows = (await self._session.execute(stmt)).all()
+        return [self._response(comment, author) for comment, author in rows]
 
     async def create_comment(
         self, meeting_id: UUID, user: User, payload: CommentCreateRequest
@@ -48,7 +50,7 @@ class CollaborationService:
         self._session.add(comment)
         await self._session.commit()
         await self._session.refresh(comment)
-        return self._response(comment)
+        return self._response(comment, user)
 
     async def update_comment(
         self, comment_id: UUID, user: User, payload: CommentUpdateRequest
@@ -59,8 +61,7 @@ class CollaborationService:
             raise ApiError("PERMISSION_DENIED", "Only the comment author may update it.", 403)
         comment.body = payload.body
         await self._session.commit()
-        await self._session.refresh(comment)
-        return self._response(comment)
+        return self._response(comment, user)
 
     async def delete_comment(self, comment_id: UUID, user: User) -> None:
         comment = await self._comment(comment_id)
@@ -90,13 +91,17 @@ class CollaborationService:
         return comment
 
     @staticmethod
-    def _response(item: Comment) -> CommentResponse:
+    def _response(item: Comment, user: User | None = None) -> CommentResponse:
         return CommentResponse(
             id=item.id,
             meeting_id=item.meeting_id,
             segment_logical_id=item.segment_logical_id,
             author_id=item.author_id,
+            author_user_id=item.author_id,
+            author_name=user.full_name if user else None,
+            author_avatar_url=user.avatar_url if user else None,
             body=item.body,
+            content=item.body,
             created_at=item.created_at,
             updated_at=item.updated_at,
         )
