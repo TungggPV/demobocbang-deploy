@@ -175,8 +175,13 @@ async def google_callback(
         raise ApiError(
             "GOOGLE_OAUTH_FAILED", "Google did not return a verified email address.", 400
         )
+    picture = profile.get("picture")
+    avatar_url = str(picture).strip() if isinstance(picture, str) and picture.strip() else None
     user = await service.google_user(
-        subject, email.strip().lower(), str(profile.get("name") or email)
+        subject,
+        email.strip().lower(),
+        str(profile.get("name") or email),
+        avatar_url=avatar_url,
     )
     session = service.session_response(user)
     fragment = urlencode(

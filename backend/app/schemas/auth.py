@@ -19,6 +19,7 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     is_email_verified: bool
+    avatar_url: str | None = None
 
 
 class UserUpdateRequest(BaseModel):

@@ -167,7 +167,18 @@ export function AppShell({ children }: { children: ReactNode }) {
         <span>Tạo mới</span>
       </a>
       <a className={path === "/settings" ? "selected" : ""} href="/settings" aria-current={path === "/settings" ? "page" : undefined}>
-        <span className="mobile-nav-icon"><Icon name="profile" /></span>
+        <span className="mobile-nav-icon">
+          {user?.avatar_url ? (
+            <img
+              src={user.avatar_url}
+              alt=""
+              style={{ width: 20, height: 20, borderRadius: "50%", objectFit: "cover" }}
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <Icon name="profile" />
+          )}
+        </span>
         <span>Tài khoản</span>
       </a>
     </nav>

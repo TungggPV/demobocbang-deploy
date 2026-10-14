@@ -65,6 +65,31 @@ export function SettingsPage() {
 
       <h3 className="settings-group-title">Thông tin cá nhân</h3>
       <div className="setting-card">
+        <div className="setting-row" style={{ alignItems: "center" }}>
+          {user?.avatar_url ? (
+            <img
+              src={user.avatar_url}
+              alt={user.full_name}
+              style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", border: "1.5px solid var(--border)", flexShrink: 0 }}
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <span className="person-avatar" style={{ width: 44, height: 44, fontSize: 15, borderRadius: "50%", flexShrink: 0 }}>
+              {user?.full_name?.slice(0, 2).toUpperCase() || "BB"}
+            </span>
+          )}
+          <div className="setting-content" style={{ marginLeft: 6 }}>
+            <strong>Ảnh đại diện</strong>
+            <small>{user?.avatar_url ? "Được tự động đồng bộ từ tài khoản Google của bạn." : "Ảnh mặc định theo chữ cái đầu của tên."}</small>
+          </div>
+          <div className="setting-action">
+            {user?.avatar_url && (
+              <span className="status" style={{ borderRadius: "999px", background: "var(--accent-soft)", color: "var(--accent-text)", fontSize: 12 }}>
+                ✓ Google Account
+              </span>
+            )}
+          </div>
+        </div>
         <div className="setting-row">
           <div className="setting-icon"><Icon name="profile" /></div>
           <div className="setting-content">

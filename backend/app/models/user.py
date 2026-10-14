@@ -27,6 +27,7 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     google_subject: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    avatar_url: Mapped[str | None] = mapped_column(String, nullable=True)
     is_email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     email_otps: Mapped[list[EmailOtp]] = relationship(back_populates="user")
