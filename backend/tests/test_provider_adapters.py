@@ -12,7 +12,7 @@ from app.providers.assemblyai import (
     AssemblyAIStream,
     _batch_result,
     _stream_event,
-    _streaming_model,
+    _streaming_turn_silence,
 )
 from app.providers.contracts import (
     BatchTranscriptionOptions,
@@ -40,11 +40,10 @@ def test_assemblyai_maps_batch_utterances_and_realtime_turns(tmp_path) -> None:
     assert provider.capabilities().batch and provider.capabilities().streaming
 
 
-def test_assemblyai_stream_selects_a_model_that_supports_the_language() -> None:
-    configured = "universal-3-6-pro"
-    assert _streaming_model("vi", configured) == "whisper-rt"
-    assert _streaming_model("auto", configured) == "whisper-rt"
-    assert _streaming_model("en", configured) == configured
+def test_assemblyai_stream_waits_for_complete_vietnamese_phrases() -> None:
+    assert _streaming_turn_silence("vi", 560, 2_000) == (800, 2_400)
+    assert _streaming_turn_silence("auto", 1_000, 3_000) == (1_000, 3_000)
+    assert _streaming_turn_silence("en", 560, 2_000) == (560, 2_000)
 
 
 def test_assemblyai_batch_sends_selected_language(tmp_path) -> None:
@@ -100,7 +99,12 @@ def test_assemblyai_batch_sends_selected_language(tmp_path) -> None:
     assert request["punctuate"] is True
     assert request["format_text"] is True
     assert request["disfluencies"] is False
-    assert request["keyterms_prompt"][:4] == ["Bóc Băng", "JWT", "API", "MongoDB"]
+    assert request["keyterms_prompt"][:4] == [
+        "Bóc Băng",
+        "tiến độ triển khai",
+        "hạng mục",
+        "khối lượng công việc",
+    ]
     assert "Họp dự án Bóc Băng" in str(request["prompt"])
     assert result.language == "vi"
 
@@ -326,7 +330,7 @@ def test_assemblyai_stream_uses_configured_model_waits_for_begin_and_termination
             "universal-3-6-pro",
             "balanced",
             StreamingOptions(
-                language="en",
+                language="vi",
                 diarization=True,
                 keyterms=("Bóc Băng", "Bóc Băng"),
             ),
@@ -335,17 +339,18 @@ def test_assemblyai_stream_uses_configured_model_waits_for_begin_and_termination
         assert query["speech_model"] == ["universal-3-6-pro"]
         assert query["mode"] == ["balanced"]
         assert query["format_turns"] == ["true"]
-        assert query["language_codes"] == ['["en"]']
+        assert query["language_codes"] == ['["vi"]']
         assert query["language_detection"] == ["true"]
         assert "language_code" not in query
         assert query["encoding"] == ["pcm_s16le"]
         assert query["speaker_labels"] == ["true"]
-        assert query["min_turn_silence"] == ["560"]
-        assert query["max_turn_silence"] == ["2000"]
+        assert query["min_turn_silence"] == ["800"]
+        assert query["max_turn_silence"] == ["2400"]
         assert "Bóc Băng" in query["keyterms_prompt"][0]
         assert "JWT" in query["keyterms_prompt"][0]
         assert query["prompt"] == [
-            "English business meeting between multiple participants."
+            "Vietnamese business meeting. Speakers discuss plans, tasks, progress, "
+            "deadlines, responsibilities, technical systems, APIs, and user experience."
         ]
 
         await websocket.incoming.put(json.dumps({
@@ -361,7 +366,7 @@ def test_assemblyai_stream_uses_configured_model_waits_for_begin_and_termination
         events = await stream.send_audio(b"audio")
         assert len(events) == 1
         assert events[0].type == "final"
-        assert events[0].language == "en"
+        assert events[0].language == "vi"
         assert events[0].provider_segment_id == "3"
         assert events[0].segment.speaker_label == "A"
         assert events[0].segment.confidence == 0.88
@@ -417,17 +422,21 @@ def test_assemblyai_stream_auto_detects_each_vietnamese_or_english_turn(
             ),
         )
         query = parse_qs(urlparse(captured_url).query)
-        assert query["speech_model"] == ["whisper-rt"]
+        assert query["speech_model"] == ["universal-3-6-pro"]
+        assert query["mode"] == ["balanced"]
+        assert query["language_codes"] == ['["vi", "en"]']
         assert query["language_detection"] == ["true"]
         assert query["speaker_labels"] == ["true"]
         assert "language_code" not in query
-        assert "language_codes" not in query
-        assert "mode" not in query
-        assert "min_turn_silence" not in query
-        assert "max_turn_silence" not in query
+        assert query["min_turn_silence"] == ["800"]
+        assert query["max_turn_silence"] == ["2400"]
         assert query["format_turns"] == ["true"]
-        assert "prompt" not in query
-        assert "keyterms_prompt" not in query
+        assert query["prompt"] == [
+            "Bilingual Vietnamese and English business meeting. Speakers discuss plans, "
+            "tasks, progress, deadlines, technical systems, APIs, and user experience. "
+            "Topic and known context: Cuộc họp bilingual"
+        ]
+        assert "Bóc Băng" in query["keyterms_prompt"][0]
 
         await websocket.incoming.put(
             json.dumps(

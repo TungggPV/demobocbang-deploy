@@ -28,16 +28,17 @@ from app.providers.contracts import (
     TranscriptionSegment,
 )
 
-# Universal Streaming is excellent for the languages it supports, but it does
-# not currently accept Vietnamese. Whisper Streaming is the AssemblyAI model
-# intended for Vietnamese and multilingual/auto-detect sessions.
-_WHISPER_STREAMING_MODEL = "whisper-rt"
-
 # Give the batch recognizer spellings for common product and engineering terms
 # that are otherwise frequently rendered as ordinary Vietnamese syllables.
 # This steers recognition only; it never rewrites the returned transcript.
 _DEFAULT_TECHNICAL_KEYTERMS = (
     "Bóc Băng",
+    "tiến độ triển khai",
+    "hạng mục",
+    "khối lượng công việc",
+    "thời hạn bàn giao",
+    "hiệu suất hệ thống",
+    "thiết bị di động",
     "JWT",
     "API",
     "MongoDB",
@@ -195,45 +196,31 @@ class AssemblyAIStream:
             import websockets
 
             language = _streaming_language_code(options.language)
-            effective_model = _streaming_model(language, streaming_model)
+            language_codes = ["vi", "en"] if language == "auto" else [language]
+            effective_min_silence, effective_max_silence = _streaming_turn_silence(
+                language, min_turn_silence_ms, max_turn_silence_ms
+            )
             params: dict[str, object] = {
                 "sample_rate": 16000,
                 "encoding": options.audio_format or "pcm_s16le",
-                "speech_model": effective_model,
+                "speech_model": streaming_model,
+                "mode": streaming_mode,
                 "format_turns": "true",
+                "language_codes": json.dumps(language_codes, ensure_ascii=False),
+                "language_detection": "true",
+                "min_turn_silence": effective_min_silence,
+                "max_turn_silence": effective_max_silence,
             }
             if options.diarization:
                 params["speaker_labels"] = "true"
-            if effective_model == _WHISPER_STREAMING_MODEL:
-                # Whisper Streaming performs its own per-turn language
-                # detection and does not accept Universal's language steering,
-                # prompting, or turn-silence parameters.
-                params["language_detection"] = "true"
-            else:
-                language_codes = [language]
-                params.update(
-                    {
-                        "mode": streaming_mode,
-                        "language_codes": json.dumps(
-                            language_codes, ensure_ascii=False
-                        ),
-                        "language_detection": "true",
-                        "min_turn_silence": min_turn_silence_ms,
-                        "max_turn_silence": max_turn_silence_ms,
-                    }
-                )
-                prompt = _transcription_prompt(language, options.context)
-                if prompt:
-                    params["prompt"] = prompt
-                keyterms = _keyterms(
-                    (*options.keyterms, *_DEFAULT_TECHNICAL_KEYTERMS)
-                )
-                if keyterms:
-                    # Streaming array parameters are JSON strings in the raw
-                    # WebSocket query (the SDK serializes these automatically).
-                    params["keyterms_prompt"] = json.dumps(
-                        keyterms, ensure_ascii=False
-                    )
+            prompt = _transcription_prompt(language, options.context)
+            if prompt:
+                params["prompt"] = prompt
+            keyterms = _keyterms((*options.keyterms, *_DEFAULT_TECHNICAL_KEYTERMS))
+            if keyterms:
+                # Streaming array parameters are JSON strings in the raw
+                # WebSocket query (the SDK serializes these automatically).
+                params["keyterms_prompt"] = json.dumps(keyterms, ensure_ascii=False)
             query = urlencode(params, doseq=True)
             websocket = await websockets.connect(
                 f"{streaming_base_url}?{query}",
@@ -417,9 +404,15 @@ def _transcription_prompt(language: str, context: str | None = None) -> str:
     # formatting or transcription instructions. A concise scenario prompt gives
     # names and domain vocabulary useful context without encouraging insertions.
     base = {
-        "vi": "Vietnamese business meeting between multiple participants.",
+        "vi": (
+            "Vietnamese business meeting. Speakers discuss plans, tasks, progress, "
+            "deadlines, responsibilities, technical systems, APIs, and user experience."
+        ),
         "en": "English business meeting between multiple participants.",
-        "auto": "Bilingual Vietnamese and English business meeting between multiple participants.",
+        "auto": (
+            "Bilingual Vietnamese and English business meeting. Speakers discuss plans, "
+            "tasks, progress, deadlines, technical systems, APIs, and user experience."
+        ),
     }.get(language, "Business meeting between multiple participants.")
     detail = context.strip() if context else ""
     return f"{base} Topic and known context: {detail}".strip()[:1750] if detail else base
@@ -447,11 +440,13 @@ def _streaming_language_code(language: str) -> str:
     return normalized
 
 
-def _streaming_model(language: str, configured_model: str) -> str:
-    """Select a provider model that actually supports the requested language."""
+def _streaming_turn_silence(
+    language: str, min_silence_ms: int, max_silence_ms: int
+) -> tuple[int, int]:
+    """Favor complete Vietnamese phrases over prematurely finalized fragments."""
     if language in {"vi", "auto"}:
-        return _WHISPER_STREAMING_MODEL
-    return configured_model
+        return max(800, min_silence_ms), max(2_400, max_silence_ms)
+    return min_silence_ms, max_silence_ms
 
 
 def _batch_result(payload: dict[str, Any]) -> TranscriptionResult:
