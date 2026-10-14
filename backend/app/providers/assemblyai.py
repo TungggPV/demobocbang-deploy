@@ -28,6 +28,29 @@ from app.providers.contracts import (
     TranscriptionSegment,
 )
 
+# Universal Streaming is excellent for the languages it supports, but it does
+# not currently accept Vietnamese. Whisper Streaming is the AssemblyAI model
+# intended for Vietnamese and multilingual/auto-detect sessions.
+_WHISPER_STREAMING_MODEL = "whisper-rt"
+
+# Give the batch recognizer spellings for common product and engineering terms
+# that are otherwise frequently rendered as ordinary Vietnamese syllables.
+# This steers recognition only; it never rewrites the returned transcript.
+_DEFAULT_TECHNICAL_KEYTERMS = (
+    "Bóc Băng",
+    "JWT",
+    "API",
+    "MongoDB",
+    "OAuth",
+    "WebSocket",
+    "frontend",
+    "backend",
+    "Docker",
+    "Vercel",
+    "Gemini",
+    "AssemblyAI",
+)
+
 
 class AssemblyAIProvider:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
@@ -90,7 +113,7 @@ class AssemblyAIProvider:
             prompt = _transcription_prompt(options.language, options.context)
             if prompt:
                 request["prompt"] = prompt
-            keyterms = _keyterms(options.keyterms)
+            keyterms = _keyterms((*options.keyterms, *_DEFAULT_TECHNICAL_KEYTERMS))
             if keyterms:
                 request["keyterms_prompt"] = keyterms
             submitted = await client.post(
@@ -172,30 +195,45 @@ class AssemblyAIStream:
             import websockets
 
             language = _streaming_language_code(options.language)
-            language_codes = ["vi", "en"] if language == "auto" else [language]
+            effective_model = _streaming_model(language, streaming_model)
             params: dict[str, object] = {
                 "sample_rate": 16000,
                 "encoding": options.audio_format or "pcm_s16le",
-                "speech_model": streaming_model,
-                "mode": streaming_mode,
+                "speech_model": effective_model,
                 "format_turns": "true",
-                # language_codes steers decoding; language_detection asks the
-                # provider to report the detected language on each final turn.
-                "language_codes": json.dumps(language_codes, ensure_ascii=False),
-                "language_detection": "true",
-                "min_turn_silence": min_turn_silence_ms,
-                "max_turn_silence": max_turn_silence_ms,
             }
             if options.diarization:
                 params["speaker_labels"] = "true"
-            prompt = _transcription_prompt(language, options.context)
-            if prompt:
-                params["prompt"] = prompt
-            keyterms = _keyterms(options.keyterms)
-            if keyterms:
-                # Streaming array parameters are JSON strings in the raw
-                # WebSocket query (the SDK serializes these automatically).
-                params["keyterms_prompt"] = json.dumps(keyterms, ensure_ascii=False)
+            if effective_model == _WHISPER_STREAMING_MODEL:
+                # Whisper Streaming performs its own per-turn language
+                # detection and does not accept Universal's language steering,
+                # prompting, or turn-silence parameters.
+                params["language_detection"] = "true"
+            else:
+                language_codes = [language]
+                params.update(
+                    {
+                        "mode": streaming_mode,
+                        "language_codes": json.dumps(
+                            language_codes, ensure_ascii=False
+                        ),
+                        "language_detection": "true",
+                        "min_turn_silence": min_turn_silence_ms,
+                        "max_turn_silence": max_turn_silence_ms,
+                    }
+                )
+                prompt = _transcription_prompt(language, options.context)
+                if prompt:
+                    params["prompt"] = prompt
+                keyterms = _keyterms(
+                    (*options.keyterms, *_DEFAULT_TECHNICAL_KEYTERMS)
+                )
+                if keyterms:
+                    # Streaming array parameters are JSON strings in the raw
+                    # WebSocket query (the SDK serializes these automatically).
+                    params["keyterms_prompt"] = json.dumps(
+                        keyterms, ensure_ascii=False
+                    )
             query = urlencode(params, doseq=True)
             websocket = await websockets.connect(
                 f"{streaming_base_url}?{query}",
@@ -407,6 +445,13 @@ def _streaming_language_code(language: str) -> str:
             retryable=False,
         )
     return normalized
+
+
+def _streaming_model(language: str, configured_model: str) -> str:
+    """Select a provider model that actually supports the requested language."""
+    if language in {"vi", "auto"}:
+        return _WHISPER_STREAMING_MODEL
+    return configured_model
 
 
 def _batch_result(payload: dict[str, Any]) -> TranscriptionResult:
