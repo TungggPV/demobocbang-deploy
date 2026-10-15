@@ -82,6 +82,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
+
+    @app.get("/", summary="Root health check")
+    @app.get("/healthz", summary="Liveness probe")
+    async def root_health() -> dict[str, str]:
+        return {"status": "ok"}
+
     app.include_router(api_router, prefix=API_V1_PREFIX)
     return app
 
