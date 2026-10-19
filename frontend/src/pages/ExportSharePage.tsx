@@ -3,7 +3,7 @@ import { translateErrorMessage } from "../api/client";
 import { capabilitiesApi, meetingsApi } from "../api/endpoints";
 import { useAsync } from "../hooks/useAsync";
 import { useJobMonitor } from "../state/useJobMonitor";
-import type { ExportArtifact, ExportFormat } from "../types/domain";
+import type { ExportArtifact, ExportFormat, Permission } from "../types/domain";
 import { Button, Failure, Loading, PageHeading, Panel, statusLabel } from "../components/ui";
 import { ShareDialog } from "./MeetingPage";
 
@@ -35,6 +35,10 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
   );
   const [options, setOptions] = useState({ include_timestamps: true, include_speakers: true, include_summary: false });
   const [artifact, setArtifact] = useState<ExportArtifact>();
+  const [permission, setPermission] = useState<Exclude<Permission, "owner">>("read");
+  const [shareUrl, setShareUrl] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [emailOpen, setEmailOpen] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -47,6 +51,7 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
   if (meeting.loading) return <Loading />;
   if (meeting.error || !meeting.data) return <Failure error={meeting.error ?? new Error("Không tìm thấy cuộc họp.")} retry={meeting.reload} />;
   const currentMeeting = meeting.data;
+  const owner = currentMeeting.permission === "owner";
   const hasTranscript = Boolean(transcript.data?.segments.length);
   const hasTranslation = Boolean(translations.data?.[0]?.segments.length);
   const translationRequired = contentMode !== "transcript";
@@ -77,9 +82,37 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
     } catch (cause) { setError((cause as Error).message); }
   }
 
+  async function createShareLink() {
+    try {
+      setSharing(true);
+      setError("");
+      setNotice("");
+      const link = await meetingsApi.createShare(meetingId, permission);
+      const url = `${window.location.origin}/share/${link.token}`;
+      setShareUrl(url);
+      setNotice("Đã tạo liên kết chia sẻ thành công!");
+    } catch (cause) {
+      setError(translateErrorMessage((cause as Error).name, (cause as Error).message));
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  async function copyShareLink() {
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setNotice("Đã sao chép liên kết chia sẻ vào khay nhớ tạm!");
+      window.setTimeout(() => setCopied(false), 2500);
+    } catch {
+      setError("Không thể tự động sao chép liên kết. Bạn vui lòng chọn và sao chép thủ công.");
+    }
+  }
+
   return (
     <>
-      <PageHeading eyebrow="XUẤT DỮ LIỆU" title="Xuất tệp & Báo cáo" context={currentMeeting.title} />
+      <PageHeading eyebrow="XUẤT & CHIA SẺ" title="Xuất tệp & Chia sẻ" context={currentMeeting.title} />
       {notice && <div className="notice">{notice}</div>}
       {error && <div className="form-error">{error}</div>}
       <div className="export-layout">
@@ -178,31 +211,91 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
           )}
         </Panel>
 
-        <Panel className="export-side-details">
-          <h2>Thông tin bản ghi</h2>
-          <p className="muted">Chi tiết bản ghi sẽ được đóng gói vào tài liệu xuất.</p>
-          <dl>
-            <dt>Tên bản ghi</dt>
-            <dd>{currentMeeting.title}</dd>
-            <dt>Ngôn ngữ</dt>
-            <dd>
-              {currentMeeting.language_mode === "vi"
-                ? "Tiếng Việt"
-                : currentMeeting.language_mode === "en"
-                ? "Tiếng Anh"
-                : "Tự động nhận diện"}
-            </dd>
-            <dt>Phân đoạn</dt>
-            <dd>{transcript.data?.segments.length ?? 0} đoạn</dd>
-            <dt>Phương thức</dt>
-            <dd>{currentMeeting.source_type === "realtime" ? "Ghi âm trực tiếp" : "Tải tệp âm thanh"}</dd>
-          </dl>
+        <div className="export-side-column" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          <Panel>
+            <h2>Chia sẻ bằng liên kết</h2>
+            <p className="muted">
+              {owner
+                ? "Tạo đường dẫn chia sẻ cho người khác. Người nhận sẽ có quyền tương ứng khi mở liên kết."
+                : "Chỉ chủ sở hữu cuộc họp mới có quyền tạo liên kết chia sẻ."}
+            </p>
 
-          <div className="export-side-email-box">
-            <p>Cần gửi trực tiếp tài liệu đính kèm qua hòm thư cho đồng nghiệp?</p>
-            <Button onClick={() => setEmailOpen(true)}>Gửi tài liệu qua Email</Button>
-          </div>
-        </Panel>
+            {owner && (
+              <div style={{ marginTop: 14 }}>
+                <label className="field">
+                  Quyền truy cập của người nhận
+                  <select
+                    value={permission}
+                    onChange={(event) => setPermission(event.target.value as typeof permission)}
+                  >
+                    <option value="read">Chỉ xem (Xem nội dung và nghe lại)</option>
+                    <option value="comment">Xem và bình luận</option>
+                    <option value="edit">Toàn quyền chỉnh sửa</option>
+                  </select>
+                </label>
+
+                <div style={{ marginTop: 12 }}>
+                  <Button tone="dark" onClick={() => void createShareLink()} disabled={sharing}>
+                    {sharing ? "Đang tạo liên kết…" : "Tạo liên kết chia sẻ"}
+                  </Button>
+                </div>
+
+                {shareUrl && (
+                  <div
+                    style={{
+                      marginTop: 14,
+                      padding: "12px 14px",
+                      background: "var(--surface-soft)",
+                      borderRadius: "var(--radius-sm, 8px)",
+                      border: "1px solid var(--border)",
+                    }}
+                  >
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>
+                      Đường dẫn chia sẻ (Copy gửi cho người nhận):
+                    </div>
+                    <div className="share-link" style={{ marginTop: 0 }}>
+                      <input
+                        readOnly
+                        value={shareUrl}
+                        onFocus={(event) => event.target.select()}
+                        style={{ background: "var(--surface)", fontSize: 13 }}
+                      />
+                      <Button tone="dark" onClick={() => void copyShareLink()} type="button">
+                        {copied ? "✓ Đã chép" : "Sao chép"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </Panel>
+
+          <Panel className="export-side-details">
+            <h2>Thông tin bản ghi</h2>
+            <p className="muted">Chi tiết bản ghi sẽ được đóng gói vào tài liệu xuất.</p>
+            <dl>
+              <dt>Tên bản ghi</dt>
+              <dd>{currentMeeting.title}</dd>
+              <dt>Ngôn ngữ</dt>
+              <dd>
+                {currentMeeting.language_mode === "vi"
+                  ? "Tiếng Việt"
+                  : currentMeeting.language_mode === "en"
+                  ? "Tiếng Anh"
+                  : "Tự động nhận diện"}
+              </dd>
+              <dt>Phân đoạn</dt>
+              <dd>{transcript.data?.segments.length ?? 0} đoạn</dd>
+              <dt>Phương thức</dt>
+              <dd>{currentMeeting.source_type === "realtime" ? "Ghi âm trực tiếp" : "Tải tệp âm thanh"}</dd>
+            </dl>
+
+            <div className="export-side-email-box">
+              <p>Cần gửi trực tiếp tài liệu đính kèm qua hòm thư cho đồng nghiệp?</p>
+              <Button onClick={() => setEmailOpen(true)}>Gửi tài liệu qua Email</Button>
+            </div>
+          </Panel>
+        </div>
       </div>
 
       {emailOpen && <ShareDialog meetingId={meetingId} title={currentMeeting.title} close={() => setEmailOpen(false)} />}
