@@ -567,15 +567,22 @@ function ShareDialog({ meetingId, close }: { meetingId: string; close: () => voi
           <div className="field">
             <span>Tệp đính kèm gửi qua email</span>
             <div className="share-attachment-options">
-              {choices.map((item) => (
-                <label key={item.value} className="checkbox-row">
-                  <input type="checkbox" checked={attachments.includes(item.value)} onChange={() => toggleAttachment(item.value)} />
-                  <div>
-                    <strong>{item.label}</strong>
-                    <small>{item.detail}</small>
-                  </div>
-                </label>
-              ))}
+              {choices.map((item) => {
+                const isSelected = attachments.includes(item.value);
+                return (
+                  <label key={item.value} className={`checkbox-row ${isSelected ? "selected" : ""}`}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleAttachment(item.value)}
+                    />
+                    <div>
+                      <strong>{item.label}</strong>
+                      <small>{item.detail}</small>
+                    </div>
+                  </label>
+                );
+              })}
             </div>
           </div>
           {message && <div className={success ? "notice" : "form-error"}>{message}</div>}

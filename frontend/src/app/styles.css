@@ -83,7 +83,7 @@ body, button, input, textarea, select { font: inherit; }
 button, input, textarea, select { color: inherit; }
 a { color: inherit; text-decoration: none; }
 button, a, input, textarea, select { -webkit-tap-highlight-color: transparent; }
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+button:focus-visible, a:focus-visible, input:not([type="checkbox"]):not([type="radio"]):focus-visible, textarea:focus-visible, select:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--accent) 35%, transparent);
   outline-offset: 2px;
 }
@@ -483,7 +483,7 @@ h1, h2, h3, p { margin-top: 0; }
 .field.full { grid-column: 1 / -1; }
 .field > span { color: var(--muted); font-weight: 500; font-size: 12px; }
 
-input, textarea, select {
+input:not([type="checkbox"]):not([type="radio"]), textarea, select {
   width: 100%;
   border: 1.5px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -493,11 +493,105 @@ input, textarea, select {
   outline: none;
   transition: border-color .15s, box-shadow .15s;
 }
-input, select { height: 44px; padding: 0 14px; }
+input:not([type="checkbox"]):not([type="radio"]), select { height: 44px; padding: 0 14px; }
 textarea { min-height: 96px; padding: 12px 14px; resize: vertical; }
-input:focus, textarea:focus, select:focus {
+input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus, select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* ── Modern Custom Checkbox ── */
+input[type="checkbox"] {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 5px;
+  background-color: var(--surface);
+  cursor: pointer;
+  display: inline-block;
+  flex-shrink: 0;
+  position: relative;
+  vertical-align: middle;
+  outline: none;
+  box-sizing: border-box;
+  transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+
+input[type="checkbox"]:hover {
+  border-color: var(--accent);
+  background-color: var(--surface-soft);
+}
+
+input[type="checkbox"]:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  outline: none;
+}
+
+input[type="checkbox"]:checked {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2.5-2.5a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e%3c/svg%3e");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 12px 12px;
+}
+
+input[type="checkbox"]:checked:hover {
+  filter: brightness(1.08);
+}
+
+input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  filter: grayscale(0.5);
+}
+
+/* ── Modern Custom Radio ── */
+input[type="radio"] {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  background-color: var(--surface);
+  cursor: pointer;
+  display: inline-block;
+  flex-shrink: 0;
+  position: relative;
+  vertical-align: middle;
+  outline: none;
+  box-sizing: border-box;
+  transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+
+input[type="radio"]:hover {
+  border-color: var(--accent);
+  background-color: var(--surface-soft);
+}
+
+input[type="radio"]:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  outline: none;
+}
+
+input[type="radio"]:checked {
+  border-color: var(--accent);
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='%236366f1' xmlns='http://www.w3.org/2000/svg'%3e%3ccircle cx='8' cy='8' r='4'/%3e%3c/svg%3e");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 10px 10px;
 }
 
 .input-group {
@@ -971,14 +1065,68 @@ a.meeting-row:hover { background: var(--surface-hover); }
 .comment-editor > div { display: flex; gap: 6px; }
 .comments-form { display: grid; gap: 8px; margin-top: 16px; }
 .share-email-dialog { width: min(560px, calc(100vw - 32px)); }
-.share-attachment-options { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 0; padding: 0; border: 0; }
-.share-attachment-options legend { margin-bottom: 8px; color: var(--text); font-size: 13px; font-weight: 700; }
-.share-attachment-options label { display: flex; align-items: flex-start; gap: 9px; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); cursor: pointer; }
-.share-attachment-options label.selected { border-color: var(--accent); background: var(--accent-soft); }
-.share-attachment-options input { width: auto; margin-top: 2px; }
-.share-attachment-options span, .share-attachment-options small { display: block; }
-.share-attachment-options strong { font-size: 13px; }
-.share-attachment-options small { margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.35; }
+.share-attachment-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.share-attachment-options legend {
+  margin-bottom: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+.share-attachment-options label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, box-shadow .15s ease, transform .12s ease;
+  user-select: none;
+}
+.share-attachment-options label:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--surface-soft);
+  transform: translateY(-1px);
+}
+.share-attachment-options label.selected,
+.share-attachment-options label:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  box-shadow: 0 0 0 1px var(--accent), 0 2px 8px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.share-attachment-options input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  flex-shrink: 0;
+}
+.share-attachment-options label div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.share-attachment-options strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.35;
+}
+.share-attachment-options small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
 .versions { display: grid; gap: 7px; }
 
 /* ═══════════════════════════════════════════
@@ -1101,9 +1249,40 @@ a.meeting-row:hover { background: var(--surface-hover); }
   color: var(--accent-text);
 }
 .export-format span { color: var(--muted); font-size: 11px; font-weight: 500; }
-.export-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 18px; }
-.export-options label { display: flex; align-items: center; gap: 8px; color: var(--secondary); font-size: 13px; }
-.export-options input { width: 16px; height: 16px; }
+.export-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.export-options label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--secondary);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface);
+  transition: all 0.15s ease;
+}
+.export-options label:hover {
+  background: var(--surface-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  color: var(--text);
+}
+.export-options label:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  color: var(--text);
+}
+.export-options input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
 .share-link { display: flex; gap: 8px; margin-top: 14px; }
 .share-link input { min-width: 0; flex: 1; }
 
@@ -1297,7 +1476,7 @@ a.meeting-row:hover { background: var(--surface-hover); }
   font-size: 13px !important;
   line-height: 1.5;
 }
-.auth-consent input { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+.auth-consent input[type="checkbox"] { width: 18px; height: 18px; flex: none; margin-top: 1px; }
 .switch {
   display: flex; justify-content: center; gap: 8px;
   margin: 20px 0 0 !important;
