@@ -45,6 +45,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            if hasattr(app.state, "media_storage") and hasattr(app.state.media_storage, "dispose"):
+                try:
+                    await app.state.media_storage.dispose()
+                except Exception:
+                    pass
             await app.state.database.dispose()
             logger.info("application_stopped")
 

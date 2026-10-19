@@ -7,6 +7,9 @@ import shutil
 from pathlib import Path
 from typing import Protocol
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
 from app.core.config import Settings
 
 
@@ -137,13 +140,147 @@ class S3StorageBackend:
             raise StorageError("S3-compatible storage operation failed.") from exc
 
 
+class DatabaseStorageBackend:
+    """Stores binary media objects in PostgreSQL for durable persistence across container restarts."""
+
+    def __init__(self, database_url: str, local_root: Path | None = None) -> None:
+        self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
+        self._local_root: Path | None = local_root.resolve() if local_root else None
+
+    async def put_file(self, source: Path, key: str) -> None:
+        content = await asyncio.to_thread(source.read_bytes)
+        await self.put_bytes(content, key)
+
+    async def put_bytes(self, content: bytes, key: str) -> None:
+        query = text(
+            """
+            INSERT INTO storage_blobs (storage_key, data, size_bytes)
+            VALUES (:key, :data, :size)
+            ON CONFLICT (storage_key) DO UPDATE
+            SET data = EXCLUDED.data,
+                size_bytes = EXCLUDED.size_bytes,
+                updated_at = NOW()
+            """
+        )
+        try:
+            async with self._engine.begin() as conn:
+                await conn.execute(query, {"key": key, "data": content, "size": len(content)})
+        except Exception as exc:
+            raise StorageError("Database storage put operation failed.") from exc
+
+        if self._local_root:
+            dest = self._local_root / key
+            try:
+                await asyncio.to_thread(dest.parent.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(dest.write_bytes, content)
+            except OSError:
+                pass
+
+    async def get_bytes(self, key: str) -> bytes:
+        if self._local_root:
+            local_path = self._local_root / key
+            if local_path.is_file():
+                try:
+                    return await asyncio.to_thread(local_path.read_bytes)
+                except OSError:
+                    pass
+        query = text("SELECT data FROM storage_blobs WHERE storage_key = :key")
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(query, {"key": key})
+                data = result.scalar()
+                if data is None:
+                    raise StorageNotFoundError("Object was not found.")
+                return bytes(data)
+        except StorageNotFoundError:
+            raise
+        except Exception as exc:
+            raise StorageError("Database storage read operation failed.") from exc
+
+    async def get_range(self, key: str, start: int, end: int) -> bytes:
+        if self._local_root:
+            local_path = self._local_root / key
+            if local_path.is_file():
+                try:
+                    def read() -> bytes:
+                        with local_path.open("rb") as s:
+                            s.seek(start)
+                            return s.read(end - start + 1)
+                    return await asyncio.to_thread(read)
+                except OSError:
+                    pass
+        length = max(0, end - start + 1)
+        query = text(
+            "SELECT substring(data FROM :start_pos FOR :length) FROM storage_blobs WHERE storage_key = :key"
+        )
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    query, {"key": key, "start_pos": start + 1, "length": length}
+                )
+                data = result.scalar()
+                if data is None:
+                    raise StorageNotFoundError("Object was not found.")
+                return bytes(data)
+        except StorageNotFoundError:
+            raise
+        except Exception as exc:
+            raise StorageError("Database storage range operation failed.") from exc
+
+    async def download_file(self, key: str, destination: Path) -> None:
+        data = await self.get_bytes(key)
+        await asyncio.to_thread(destination.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(destination.write_bytes, data)
+
+    async def delete(self, key: str) -> None:
+        query = text("DELETE FROM storage_blobs WHERE storage_key = :key")
+        try:
+            async with self._engine.begin() as conn:
+                await conn.execute(query, {"key": key})
+        except Exception as exc:
+            raise StorageError("Database storage delete operation failed.") from exc
+
+        if self._local_root:
+            local_path = self._local_root / key
+            if local_path.exists():
+                try:
+                    await asyncio.to_thread(local_path.unlink)
+                except OSError:
+                    pass
+
+    async def presigned_get_url(self, key: str, expires_in: int, **_: object) -> str | None:
+        return None
+
+    async def dispose(self) -> None:
+        await self._engine.dispose()
+
+
 def build_storage_backend(settings: Settings) -> StorageBackend:
-    if settings.storage_backend == "local":
-        return LocalStorageBackend(settings.media_storage_path)
-    missing = [name for name, value in {"S3_ACCESS_KEY_ID": settings.s3_access_key_id, "S3_SECRET_ACCESS_KEY": settings.s3_secret_access_key, "S3_BUCKET_NAME": settings.s3_bucket_name}.items() if not value]
-    if missing:
-        raise ValueError("STORAGE_BACKEND=s3 requires " + ", ".join(missing) + ".")
-    return S3StorageBackend(endpoint_url=settings.s3_endpoint_url, access_key_id=settings.s3_access_key_id, secret_access_key=settings.s3_secret_access_key, bucket_name=settings.s3_bucket_name, region=settings.s3_region)
+    if settings.storage_backend in {"s3", "s3-compatible"}:
+        missing = [
+            name
+            for name, value in {
+                "S3_ACCESS_KEY_ID": settings.s3_access_key_id,
+                "S3_SECRET_ACCESS_KEY": settings.s3_secret_access_key,
+                "S3_BUCKET_NAME": settings.s3_bucket_name,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise ValueError("STORAGE_BACKEND=s3 requires " + ", ".join(missing) + ".")
+        return S3StorageBackend(
+            endpoint_url=settings.s3_endpoint_url,
+            access_key_id=settings.s3_access_key_id,
+            secret_access_key=settings.s3_secret_access_key,
+            bucket_name=settings.s3_bucket_name,
+            region=settings.s3_region,
+        )
+    if settings.database_url and (
+        settings.storage_backend in {"database", "postgres", "db"}
+        or settings.environment.lower() in {"production", "prod"}
+    ):
+        return DatabaseStorageBackend(settings.database_url, settings.media_storage_path)
+    return LocalStorageBackend(settings.media_storage_path)
 
 
 def _client_error_code(error: Exception) -> str | None:

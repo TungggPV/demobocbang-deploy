@@ -2,7 +2,7 @@
 
 from app.models.collaboration import Comment
 from app.models.export import Export
-from app.models.media import Job, MediaFile
+from app.models.media import Job, MediaFile, StorageBlob
 from app.models.meeting import Meeting, MeetingMember, ShareLink
 from app.models.summary import Summary, SummaryVersion
 from app.models.transcript import SegmentVersion, Speaker, Transcript, TranscriptVersion
@@ -21,6 +21,7 @@ __all__ = [
     "SegmentVersion",
     "ShareLink",
     "Speaker",
+    "StorageBlob",
     "Summary",
     "SummaryVersion",
     "Transcript",

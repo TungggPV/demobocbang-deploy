@@ -365,7 +365,35 @@ function MeetingSidePanel({ activeTab, setActiveTab, meeting, segmentCount, spea
 const MediaPlayer = forwardRef<AudioPlayerHandle, { meetingId: string; mediaId: string; filename: string; segments: Segment[]; onActiveSegment: (id?: string) => void }>(function MediaPlayer({ meetingId, mediaId, filename, segments, onActiveSegment }, ref) {
   const audio = useRef<HTMLAudioElement>(null); const speedControl = useRef<HTMLDivElement>(null); const [source, setSource] = useState(""); const [error, setError] = useState(""); const [speed, setSpeed] = useState(1); const [speedOpen, setSpeedOpen] = useState(false);
   useImperativeHandle(ref, () => ({ seek(milliseconds) { const element = audio.current; if (!element) return; element.currentTime = milliseconds / 1000; void element.play(); } }), []);
-  useEffect(() => { let active = true; let objectUrl = ""; setSource(""); setError(""); void meetingsApi.streamMedia(meetingId, mediaId).then((blob) => { if (!blob.size) throw new Error("Băng ghi âm đang trống."); objectUrl = URL.createObjectURL(blob); if (active) setSource(objectUrl); else URL.revokeObjectURL(objectUrl); }).catch((cause: Error) => active && setError(cause.message)); return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); }; }, [meetingId, mediaId]);
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    setSource("");
+    setError("");
+    void meetingsApi
+      .streamMedia(meetingId, mediaId)
+      .then((blob) => {
+        if (!blob.size) throw new Error("Băng ghi âm đang trống.");
+        objectUrl = URL.createObjectURL(blob);
+        if (active) setSource(objectUrl);
+        else URL.revokeObjectURL(objectUrl);
+      })
+      .catch((cause: Error) => {
+        if (!active) return;
+        const msg = cause.message || "";
+        if (msg.includes("Media is no longer available") || msg.includes("MEDIA_UNAVAILABLE")) {
+          setError(
+            "Tệp âm thanh này được tải lên trước khi kích hoạt lưu trữ đám mây nên không còn trên máy chủ. Toàn bộ nội dung văn bản bên dưới vẫn được lưu an toàn."
+          );
+        } else {
+          setError(msg);
+        }
+      });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [meetingId, mediaId]);
   useEffect(() => {
     if (!speedOpen) return;
     function closeOutside(event: PointerEvent) { if (!speedControl.current?.contains(event.target as Node)) setSpeedOpen(false); }
