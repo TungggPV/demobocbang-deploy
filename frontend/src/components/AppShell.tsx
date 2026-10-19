@@ -31,7 +31,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  const initials = user?.full_name
+  const initials = (user?.full_name || user?.email || "BB")
     .split(/\s+/)
     .map((part) => part[0])
     .join("")

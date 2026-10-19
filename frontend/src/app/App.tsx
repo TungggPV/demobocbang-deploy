@@ -1,5 +1,6 @@
 import { useAuth } from "../auth/AuthContext";
 import { AppShell } from "../components/AppShell";
+import { ErrorBoundary } from "../components/ui";
 import { AuthPage } from "../pages/AuthPage";
 import { ExportSharePage } from "../pages/ExportSharePage";
 import { MeetingPage } from "../pages/MeetingPage";
@@ -39,5 +40,9 @@ export function App() {
     </div>
   );
   if (!user) return <AuthPage initialMode={current.page === "auth" ? current.mode : "login"} />;
-  return <AppShell>{current.page === "voice-profiles" ? <VoiceProfilesPage /> : current.page === "meeting" ? <MeetingPage meetingId={current.id} /> : current.page === "upload" ? <UploadPage meetingId={current.id} /> : current.page === "speakers" ? <SpeakersPage meetingId={current.id} /> : current.page === "translation" ? <TranslationPage meetingId={current.id} /> : current.page === "summary" ? <SummaryPage meetingId={current.id} /> : current.page === "export-share" ? <ExportSharePage meetingId={current.id} /> : current.page === "settings" ? <SettingsPage /> : current.page === "create" ? <MeetingsPage createOnly initialSource={new URLSearchParams(window.location.search).get("mode") === "upload" ? "upload" : undefined} /> : <MeetingsPage />}</AppShell>;
+  return (
+    <ErrorBoundary>
+      <AppShell>{current.page === "voice-profiles" ? <VoiceProfilesPage /> : current.page === "meeting" ? <MeetingPage meetingId={current.id} /> : current.page === "upload" ? <UploadPage meetingId={current.id} /> : current.page === "speakers" ? <SpeakersPage meetingId={current.id} /> : current.page === "translation" ? <TranslationPage meetingId={current.id} /> : current.page === "summary" ? <SummaryPage meetingId={current.id} /> : current.page === "export-share" ? <ExportSharePage meetingId={current.id} /> : current.page === "settings" ? <SettingsPage /> : current.page === "create" ? <MeetingsPage createOnly initialSource={new URLSearchParams(window.location.search).get("mode") === "upload" ? "upload" : undefined} /> : <MeetingsPage />}</AppShell>
+    </ErrorBoundary>
+  );
 }

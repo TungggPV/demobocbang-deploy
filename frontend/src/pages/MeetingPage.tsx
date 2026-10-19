@@ -51,6 +51,22 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
   const [showRealtimeTranslations, setShowRealtimeTranslations] = useState(false);
   const player = useRef<AudioPlayerHandle>(null);
 
+  const refreshMedia = useCallback(async () => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const items = await meetingsApi.media(meetingId);
+        if (items && items.length > 0) {
+          media.setData(items);
+          return;
+        }
+      } catch {
+        // ignore
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    void media.reload();
+  }, [meetingId, media]);
+
   useEffect(() => {
     const stored = new Set(transcript.data?.segments.map((segment) => segment.logical_segment_id));
     setLiveTranscript((current) => Object.fromEntries(Object.entries(current).filter(
@@ -143,21 +159,6 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     ...(transcript.data?.segments.map((segment) => segment.end_ms) ?? [0]),
   );
 
-  const refreshMedia = useCallback(async () => {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      try {
-        const items = await meetingsApi.media(meetingId);
-        if (items && items.length > 0) {
-          media.setData(items);
-          return;
-        }
-      } catch {
-        // ignore
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-    void media.reload();
-  }, [meetingId, media]);
 
   return <>
     <PageHeading
