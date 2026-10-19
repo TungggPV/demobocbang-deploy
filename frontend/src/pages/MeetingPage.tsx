@@ -90,21 +90,107 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     if (!editing) return;
     const text = draft.text.trim();
     if (!text) return setNotice("Nội dung đoạn ghi âm không được để trống.");
+    const segmentToSave = editing;
+    const changedSpeaker = draft.speakerId || null;
+    const startMs = parseTimestampInput(draft.startTime);
+    const endMs = parseTimestampInput(draft.endTime);
+    if (startMs === undefined || endMs === undefined || endMs <= startMs) {
+      return setNotice("Nhập thời gian theo mm:ss hoặc hh:mm:ss; mốc kết thúc phải lớn hơn mốc bắt đầu.");
+    }
+
+    setEditing(undefined);
+
+    // Optimistic update
+    transcript.setData((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        segments: current.segments.map((s) =>
+          s.logical_segment_id === segmentToSave.logical_segment_id
+            ? { ...s, text, start_ms: startMs, end_ms: endMs, speaker_id: changedSpeaker ?? undefined }
+            : s,
+        ),
+      };
+    });
+
     try {
-      const changedSpeaker = draft.speakerId || null;
       const body: { text?: string; start_ms?: number; end_ms?: number } = {};
-      if (editing.text !== text) body.text = text;
-      const timeChanged = draft.startTime !== formatTimestampInput(editing.start_ms) || draft.endTime !== formatTimestampInput(editing.end_ms);
-      if (timeChanged) {
-        const startMs = parseTimestampInput(draft.startTime); const endMs = parseTimestampInput(draft.endTime);
-        if (startMs === undefined || endMs === undefined || endMs <= startMs) return setNotice("Nhập thời gian theo mm:ss hoặc hh:mm:ss; mốc kết thúc phải lớn hơn mốc bắt đầu.");
-        body.start_ms = startMs; body.end_ms = endMs;
+      if (segmentToSave.text !== text) body.text = text;
+      if (draft.startTime !== formatTimestampInput(segmentToSave.start_ms) || draft.endTime !== formatTimestampInput(segmentToSave.end_ms)) {
+        body.start_ms = startMs;
+        body.end_ms = endMs;
       }
-      if (Object.keys(body).length) await meetingsApi.saveSegment(editing.logical_segment_id, body);
-      if ((editing.speaker_id ?? null) !== changedSpeaker) await meetingsApi.setSegmentSpeaker(editing.logical_segment_id, changedSpeaker);
-      if (!Object.keys(body).length && (editing.speaker_id ?? null) === changedSpeaker) { setEditing(undefined); return setNotice("Không có thay đổi mới."); }
-      await transcript.reload(); await versions.reload(); setEditing(undefined); setNotice("Đã lưu thay đổi và tạo phiên bản transcript mới.");
-    } catch (cause) { setNotice(meetingErrorMessage(cause)); }
+      if (Object.keys(body).length) await meetingsApi.saveSegment(segmentToSave.logical_segment_id, body);
+      if ((segmentToSave.speaker_id ?? null) !== changedSpeaker) {
+        await meetingsApi.setSegmentSpeaker(segmentToSave.logical_segment_id, changedSpeaker);
+      }
+      void transcript.reload();
+      void versions.reload();
+      setNotice("Đã lưu thay đổi và tạo phiên bản transcript mới.");
+    } catch (cause) {
+      await transcript.reload();
+      setNotice(meetingErrorMessage(cause));
+    }
+  }
+
+  async function handleSplit(segment: Segment, splitAt: number, first: string, second: string) {
+    setPendingSplit(undefined);
+
+    // 1. Instant optimistic update
+    const firstSegment: Segment = { ...segment, end_ms: splitAt, text: first };
+    const secondSegment: Segment = { ...segment, logical_segment_id: `temp-split-${Date.now()}`, start_ms: splitAt, text: second };
+
+    transcript.setData((current) => {
+      if (!current) return current;
+      const idx = current.segments.findIndex((s) => s.logical_segment_id === segment.logical_segment_id);
+      if (idx === -1) return current;
+      const nextSegments = [...current.segments];
+      nextSegments.splice(idx, 1, firstSegment, secondSegment);
+      return { ...current, segments: nextSegments };
+    });
+
+    try {
+      await meetingsApi.splitSegment(segment.logical_segment_id, splitAt, first, second);
+      setNotice("Đã tách đoạn và tạo phiên bản mới.");
+      void transcript.reload();
+      void versions.reload();
+    } catch (cause) {
+      await transcript.reload();
+      setNotice(meetingErrorMessage(cause));
+    }
+  }
+
+  async function handleMerge(selected: Segment[]) {
+    const sorted = [...selected].sort((a, b) => a.start_ms - b.start_ms);
+    setPendingMerge(undefined);
+    setMergeIds([]);
+
+    // 1. Instant optimistic update
+    const primaryId = sorted[0].logical_segment_id;
+    const removedIds = new Set(sorted.slice(1).map((s) => s.logical_segment_id));
+    const mergedSegment: Segment = {
+      ...sorted[0],
+      end_ms: Math.max(...sorted.map((s) => s.end_ms)),
+      text: sorted.map((s) => s.text.trim()).filter(Boolean).join(" "),
+    };
+
+    transcript.setData((current) => {
+      if (!current) return current;
+      const nextSegments = current.segments
+        .filter((s) => !removedIds.has(s.logical_segment_id))
+        .map((s) => (s.logical_segment_id === primaryId ? mergedSegment : s));
+      return { ...current, segments: nextSegments };
+    });
+
+    try {
+      await meetingsApi.mergeSegments(sorted.map((s) => s.logical_segment_id));
+      setNotice(`Đã gộp ${sorted.length} đoạn và tạo phiên bản mới.`);
+      void transcript.reload();
+      void versions.reload();
+    } catch (cause) {
+      await transcript.reload();
+      setNotice(meetingErrorMessage(cause));
+    }
   }
 
   async function mutate(action: () => Promise<TranscriptMutation>, success: string, removedId?: string) {
@@ -357,8 +443,8 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
 
     {renameOpen && <RenameMeetingDialog title={meeting.data.title} close={() => setRenameOpen(false)} confirm={async (title) => { const updated = await meetingsApi.update(meetingId, { title }); meeting.setData(updated); setRenameOpen(false); setNotice("Đã đổi tên bản ghi."); }} />}
     {shareOpen && <ShareDialog meetingId={meetingId} title={meeting.data.title} close={() => setShareOpen(false)} />}
-    {pendingSplit && <SplitDialog segment={pendingSplit} close={() => setPendingSplit(undefined)} confirm={(splitAt, first, second) => { const segment = pendingSplit; setPendingSplit(undefined); void mutate(() => meetingsApi.splitSegment(segment.logical_segment_id, splitAt, first, second), "Đã tách đoạn và tạo phiên bản mới."); }} />}
-    {pendingMerge && <ConfirmDialog title={`Gộp ${pendingMerge.length} đoạn?`} detail="Các đoạn đã chọn sẽ được nối theo đúng thứ tự thời gian thành một đoạn." confirmLabel="Gộp đoạn" close={() => setPendingMerge(undefined)} confirm={() => { const selected = [...pendingMerge].sort((a, b) => a.start_ms - b.start_ms); setPendingMerge(undefined); setMergeIds([]); void mutate(() => meetingsApi.mergeSegments(selected.map((segment) => segment.logical_segment_id)), `Đã gộp ${selected.length} đoạn và tạo phiên bản mới.`); }} />}
+    {pendingSplit && <SplitDialog segment={pendingSplit} close={() => setPendingSplit(undefined)} confirm={(splitAt, first, second) => void handleSplit(pendingSplit, splitAt, first, second)} />}
+    {pendingMerge && <ConfirmDialog title={`Gộp ${pendingMerge.length} đoạn?`} detail="Các đoạn đã chọn sẽ được nối theo đúng thứ tự thời gian thành một đoạn." confirmLabel="Gộp đoạn" close={() => setPendingMerge(undefined)} confirm={() => void handleMerge(pendingMerge)} />}
     {pendingDelete && <ConfirmDialog title="Xóa đoạn transcript?" detail="Đoạn đã xóa sẽ không còn trong phiên bản transcript hiện hành." confirmLabel="Xóa đoạn" close={() => setPendingDelete(undefined)} confirm={() => { const segment = pendingDelete; setPendingDelete(undefined); void mutate(() => meetingsApi.deleteSegment(segment.logical_segment_id), "Đã xóa đoạn và tạo phiên bản mới.", segment.logical_segment_id); }} />}
   </>;
 }

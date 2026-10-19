@@ -161,8 +161,8 @@ class TranscriptService:
         merged_text = " ".join(s.text.strip() for s in all_selected if s.text.strip())
         primary.text = merged_text
 
-        for seg in all_selected[1:]:
-            await self._session.delete(seg)
+        del_ids = [seg.id for seg in all_selected[1:]]
+        await self._session.execute(delete(CurrentSegment).where(CurrentSegment.id.in_(del_ids)))
 
         await self._event(
             transcript,
