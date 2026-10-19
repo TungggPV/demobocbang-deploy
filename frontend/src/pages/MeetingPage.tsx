@@ -167,7 +167,11 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
       actions={<>
         {editable && <Button onClick={() => setRenameOpen(true)}>Đổi tên</Button>}
         {meeting.data.source_type === "upload" && <a className="btn btn-light" href={`/meetings/${meetingId}/upload`}>Tải tệp</a>}
-        {owner && <Button tone="dark" onClick={() => setShareOpen(true)}>Gửi qua email</Button>}
+        {(owner || editable) && (
+          <Button tone="dark" onClick={() => setShareOpen(true)}>
+            <Icon name="export" /> Chia sẻ qua email
+          </Button>
+        )}
       </>}
     />
     {notice && <div className="notice">{notice}</div>}
@@ -604,8 +608,8 @@ export function ShareDialog({ meetingId, title, close }: { meetingId: string; ti
     <div className="dialog-backdrop">
       <section className="dialog" role="dialog" aria-modal="true" style={{ width: 540, maxWidth: "94vw" }}>
         <button className="close" onClick={close} type="button">×</button>
-        <h2>Gửi tài liệu qua Email</h2>
-        <p>Gửi các tệp đính kèm đã chọn trực tiếp tới email người nhận.</p>
+        <h2>Chia sẻ tài liệu qua Email</h2>
+        <p>Gửi các tài liệu đã chọn (băng ghi âm, nội dung bóc băng, tóm tắt, bản dịch) tới email người nhận.</p>
 
         <form onSubmit={submit}>
           <label className="field">
