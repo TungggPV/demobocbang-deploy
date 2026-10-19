@@ -268,7 +268,7 @@ def test_realtime_persists_finals_but_never_partials_and_handles_pause_resume(
             assert final["type"] == "transcript.final"
             assert final["text"] == "Bản cuối được lưu"
             websocket.send_text('{"type":"recording.stop"}')
-            assert websocket.receive_json() == {"type": "meeting.status", "status": "processing"}
+            assert websocket.receive_json() == {"type": "meeting.status", "status": "completed"}
 
     async def verify() -> None:
         engine = create_async_engine(database_url)
@@ -281,7 +281,7 @@ def test_realtime_persists_finals_but_never_partials_and_handles_pause_resume(
         assert len(versions) == 1
         assert len(segments) == 1
         assert segments[0].text == "Bản cuối được lưu"
-        assert meeting.status == "processing"
+        assert meeting.status == "completed"
 
     asyncio.run(verify())
     assert provider.options is not None and provider.options.diarization is True
@@ -399,7 +399,7 @@ def test_realtime_translation_only_translates_final_segments(tmp_path: Path) -> 
                 "text": "Translated: Bản cuối được lưu",
             }
             websocket.send_text('{"type":"recording.stop"}')
-            assert websocket.receive_json() == {"type": "meeting.status", "status": "processing"}
+            assert websocket.receive_json() == {"type": "meeting.status", "status": "completed"}
 
     assert len(translation.calls) == 1
     segments, source, target = translation.calls[0]
@@ -523,7 +523,7 @@ def test_realtime_translation_errors_do_not_interrupt_stt(tmp_path: Path) -> Non
             websocket.send_text('{"type":"recording.pause"}')
             websocket.send_text('{"type":"recording.resume"}')
             websocket.send_text('{"type":"recording.stop"}')
-            assert websocket.receive_json() == {"type": "meeting.status", "status": "processing"}
+            assert websocket.receive_json() == {"type": "meeting.status", "status": "completed"}
 
 
 def test_realtime_rejects_provider_without_streaming_capability(tmp_path: Path) -> None:
@@ -661,3 +661,43 @@ def _create_realtime_meeting(client: TestClient, token: object) -> str:
     )
     assert response.status_code == 201
     return response.json()["id"]
+
+
+def test_realtime_saves_media_file_on_recording_complete(tmp_path: Path) -> None:
+    app, sender, _ = _app(tmp_path)
+    provider = FakeProvider()
+    app.state.stt_provider = provider
+    with TestClient(app) as client:
+        session = _verified_session(client, sender)
+        token = session["access_token"]
+        meeting_id = _create_realtime_meeting(client, token)
+        with client.websocket_connect(
+            f"/api/v1/realtime/{meeting_id}?access_token={token}"
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "session.ready"
+            websocket.send_bytes(b"audio-chunk")
+            assert websocket.receive_json()["type"] == "transcript.partial"
+            assert websocket.receive_json()["type"] == "transcript.final"
+            websocket.send_text('{"type":"recording.stop"}')
+            assert websocket.receive_json() == {"type": "meeting.status", "status": "completed"}
+
+        media_res = client.get(
+            f"/api/v1/meetings/{meeting_id}/media",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert media_res.status_code == 200
+        media_list = media_res.json()
+        assert len(media_list) == 1
+        media = media_list[0]
+        assert media["mime_type"] == "audio/wav"
+        assert media["status"] == "ready"
+        assert media["size_bytes"] > 44
+
+        stream_res = client.get(
+            f"/api/v1/meetings/{meeting_id}/media/{media['id']}/stream",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert stream_res.status_code == 200
+        assert stream_res.content[:4] == b"RIFF"
+        assert stream_res.content[8:12] == b"WAVE"
+

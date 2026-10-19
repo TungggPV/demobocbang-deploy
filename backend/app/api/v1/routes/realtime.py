@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
+import wave
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
+from pathlib import Path
 from time import perf_counter
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from anyio import CancelScope
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
@@ -20,7 +23,9 @@ from app.core.errors import ApiError
 from app.core.security import TokenService
 from app.db.session import Database
 from app.models.enums import MeetingPermission
+from app.models.media import MediaFile
 from app.models.user import User
+from app.providers.storage import MediaStorage
 from app.providers.contracts import (
     StreamingEvent,
     StreamingOptions,
@@ -61,10 +66,93 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
     retryable_interruption = False
     send_lock = asyncio.Lock()
     session_stack = AsyncExitStack()
+    pcm_temp_file = tempfile.NamedTemporaryFile(prefix="recording-pcm-", suffix=".pcm", delete=False)
+    pcm_path = Path(pcm_temp_file.name)
+    pcm_bytes_count = 0
+    media_saved = False
+    meeting = None
+    session = None
 
     async def send_json(payload: dict[str, object]) -> None:
         async with send_lock:
             await websocket.send_json(payload)
+
+    async def _save_realtime_media() -> None:
+        nonlocal media_saved, pcm_bytes_count
+        if media_saved:
+            return
+        media_saved = True
+        try:
+            if not pcm_temp_file.closed:
+                pcm_temp_file.flush()
+                pcm_temp_file.close()
+        except OSError:
+            pass
+
+        if session is None or meeting is None or pcm_bytes_count <= 0 or not pcm_path.exists():
+            return
+
+        storage = cast(
+            MediaStorage | None, getattr(websocket.app.state, "media_storage", None)
+        )
+        if storage is None:
+            return
+
+        wav_temp = tempfile.NamedTemporaryFile(
+            prefix="recording-wav-", suffix=".wav", delete=False
+        )
+        wav_path = Path(wav_temp.name)
+        wav_temp.close()
+
+        try:
+            with open(pcm_path, "rb") as pcm_in, wave.open(str(wav_path), "wb") as wav_out:
+                wav_out.setnchannels(1)
+                wav_out.setsampwidth(2)
+                wav_out.setframerate(16000)
+                while True:
+                    data = pcm_in.read(65536)
+                    if not data:
+                        break
+                    wav_out.writeframes(data)
+
+            wav_size = wav_path.stat().st_size
+            duration_ms = max(1000, int((pcm_bytes_count / 32000) * 1000))
+            media_id = uuid4()
+            storage_key = f"media/meetings/{meeting.id}/{media_id}.wav"
+            await storage.put_file(wav_path, storage_key)
+
+            media = MediaFile(
+                id=media_id,
+                meeting_id=meeting.id,
+                original_filename=f"{meeting.title}.wav",
+                mime_type="audio/wav",
+                size_bytes=wav_size,
+                duration_ms=duration_ms,
+                storage_key=storage_key,
+                status="ready",
+            )
+            session.add(media)
+            if (meeting.duration_ms or 0) < duration_ms:
+                meeting.duration_ms = duration_ms
+            await session.commit()
+            logger.info(
+                "realtime_audio_persisted",
+                extra={
+                    "meeting_id": str(meeting.id),
+                    "media_id": str(media_id),
+                    "duration_ms": duration_ms,
+                    "size_bytes": wav_size,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "realtime_audio_persist_failed", extra={"meeting_id": str(meeting.id)}
+            )
+        finally:
+            try:
+                wav_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     try:
         settings = cast(Settings, websocket.app.state.settings)
@@ -173,7 +261,11 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
                     )
                     continue
                 try:
-                    events = await stream.send_audio(message["bytes"])
+                    chunk = message["bytes"]
+                    if not pcm_temp_file.closed:
+                        pcm_temp_file.write(chunk)
+                        pcm_bytes_count += len(chunk)
+                    events = await stream.send_audio(chunk)
                     await _emit_events(
                         send_json,
                         transcript_service,
@@ -300,6 +392,7 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
                     if translation_session is not None:
                         await translation_session.flush()
                         await translation_session.close()
+                    await _save_realtime_media()
                     await transcript_service.recording_ended()
                     await send_json({"type": "meeting.status", "status": "completed"})
                     await websocket.close(code=status.WS_1000_NORMAL_CLOSURE)
@@ -358,10 +451,20 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
                     and not retryable_interruption
                 ):
                     try:
+                        await _save_realtime_media()
                         await transcript_service.recording_ended()
                     except RuntimeError:
                         pass
             finally:
+                try:
+                    if not pcm_temp_file.closed:
+                        pcm_temp_file.close()
+                except OSError:
+                    pass
+                try:
+                    pcm_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 await session_stack.aclose()
 
 

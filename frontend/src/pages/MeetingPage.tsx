@@ -247,7 +247,6 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
                     <button className="segment-time" type="button" onClick={() => player.current?.seek(segment.start_ms)}>
                       {formatTime(segment.start_ms)} – {formatTime(segment.end_ms)}
                     </button>
-                    {segment.confidence !== undefined && <small>{Math.round(segment.confidence * 100)}% tin cậy</small>}
                   </div>
 
                   {editing?.logical_segment_id === segment.logical_segment_id ? (

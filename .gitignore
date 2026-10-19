@@ -18,3 +18,4 @@ speechmatics-test/
 # IDE and OS
 .DS_Store
 Thumbs.db
+.local-media/
