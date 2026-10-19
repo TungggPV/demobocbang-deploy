@@ -100,20 +100,22 @@ class ExportService:
             ) from exc
 
     async def purge_meeting_storage(self, meeting_id: UUID) -> None:
-        keys = list(
-            await self._session.scalars(
+        keys = [
+            k
+            for k in await self._session.scalars(
                 select(Export.storage_key).where(
                     Export.meeting_id == meeting_id, Export.storage_key.is_not(None)
                 )
             )
-        )
-        try:
-            for key in keys:
-                await self._storage.delete(key)
-        except StorageError as exc:
-            raise ApiError(
-                "EXPORT_STORAGE_ERROR", "Meeting exports could not be deleted.", 502
-            ) from exc
+            if k
+        ]
+        if keys:
+            try:
+                await self._storage.delete_many(keys)
+            except StorageError as exc:
+                raise ApiError(
+                    "EXPORT_STORAGE_ERROR", "Meeting exports could not be deleted.", 502
+                ) from exc
 
     async def _current_version(self, meeting: Meeting) -> TranscriptVersion:
         if meeting.current_transcript_version_id is None:

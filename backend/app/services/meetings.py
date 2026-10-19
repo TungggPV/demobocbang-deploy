@@ -99,10 +99,26 @@ class MeetingService:
         await self._session.refresh(meeting)
         return self._meeting_response(meeting, permission)
 
-    async def delete(self, meeting_id: UUID, user: User) -> None:
-        meeting, _ = await self.require_access(meeting_id, user, "owner")
+    async def delete(self, meeting_id: UUID, user: User, meeting: Meeting | None = None) -> None:
+        if meeting is None:
+            meeting, _ = await self.require_access(meeting_id, user, "owner")
         await self._session.delete(meeting)
         await self._session.commit()
+
+    async def require_meeting_access(
+        self, meeting: Meeting, user: User, required: MeetingPermission | str
+    ) -> AccessLevel:
+        permission: AccessLevel
+        if meeting.owner_id == user.id:
+            permission = "owner"
+        else:
+            membership = await self._session.get(MeetingMember, (meeting.id, user.id))
+            if membership is None:
+                raise ApiError("PERMISSION_DENIED", "You do not have access to this meeting.", 403)
+            permission = membership.permission
+        if _PERMISSION_RANK[permission] < _PERMISSION_RANK[required]:
+            raise ApiError("PERMISSION_DENIED", "You do not have permission for this action.", 403)
+        return permission
 
     async def require_access(
         self, meeting_id: UUID, user: User, required: MeetingPermission | str
@@ -110,16 +126,7 @@ class MeetingService:
         meeting = await self._session.get(Meeting, meeting_id)
         if meeting is None:
             raise ApiError("MEETING_NOT_FOUND", "Meeting was not found.", 404)
-        permission: AccessLevel
-        if meeting.owner_id == user.id:
-            permission = "owner"
-        else:
-            membership = await self._session.get(MeetingMember, (meeting_id, user.id))
-            if membership is None:
-                raise ApiError("PERMISSION_DENIED", "You do not have access to this meeting.", 403)
-            permission = membership.permission
-        if _PERMISSION_RANK[permission] < _PERMISSION_RANK[required]:
-            raise ApiError("PERMISSION_DENIED", "You do not have permission for this action.", 403)
+        permission = await self.require_meeting_access(meeting, user, required)
         return meeting, permission
 
     async def list_members(self, meeting_id: UUID, user: User) -> list[dict[str, object]]:

@@ -92,8 +92,21 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
   }
 
   async function mutate(action: () => Promise<TranscriptMutation>, success: string, removedId?: string) {
-    try { const result = await action(); if (removedId) applyMutation(result, removedId); else { await transcript.reload(); await versions.reload(); } setNotice(success); }
-    catch (cause) { setNotice(meetingErrorMessage(cause)); }
+    if (removedId) {
+      transcript.setData((current) => {
+        if (!current) return current;
+        return { ...current, segments: current.segments.filter((segment) => segment.logical_segment_id !== removedId) };
+      });
+    }
+    try {
+      const result = await action();
+      if (removedId) applyMutation(result, removedId);
+      else { await transcript.reload(); await versions.reload(); }
+      setNotice(success);
+    } catch (cause) {
+      await transcript.reload();
+      setNotice(meetingErrorMessage(cause));
+    }
   }
 
   function toggleMerge(segment: Segment) {

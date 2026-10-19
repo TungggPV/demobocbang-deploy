@@ -49,12 +49,16 @@ function MeetingsOverview() {
 
   async function deleteMeeting() {
     if (!pendingDelete) return;
+    const target = pendingDelete;
+    setPendingDelete(undefined);
+    if (meetings.data) {
+      meetings.setData(meetings.data.filter((item) => item.id !== target.id));
+    }
     try {
-      await meetingsApi.remove(pendingDelete.id);
-      setPendingDelete(undefined);
+      await meetingsApi.remove(target.id);
       await meetings.reload();
     } catch (cause) {
-      setPendingDelete(undefined);
+      await meetings.reload();
       window.alert((cause as Error).message);
     }
   }

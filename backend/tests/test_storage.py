@@ -80,3 +80,45 @@ def test_s3_adapter_propagates_client_failure() -> None:
 
     with pytest.raises(StorageError, match="S3-compatible storage operation failed"):
         asyncio.run(backend.delete("media/meetings/a/file.mp3"))
+
+
+def test_local_storage_delete_many(tmp_path: Path) -> None:
+    async def run() -> None:
+        storage = LocalStorageBackend(tmp_path / "objects")
+        await storage.put_bytes(b"123", "item1.txt")
+        await storage.put_bytes(b"456", "item2.txt")
+        assert await storage.get_bytes("item1.txt") == b"123"
+        assert await storage.get_bytes("item2.txt") == b"456"
+        await storage.delete_many(["item1.txt", "item2.txt"])
+        with pytest.raises(StorageError):
+            await storage.get_bytes("item1.txt")
+        with pytest.raises(StorageError):
+            await storage.get_bytes("item2.txt")
+
+    asyncio.run(run())
+
+
+def test_s3_adapter_delete_many() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def delete_objects(self, **kwargs: object) -> None:
+            self.calls.append(("delete_objects", kwargs))
+
+    backend = S3StorageBackend.__new__(S3StorageBackend)
+    backend._bucket_name = "private-bucket"
+    backend._client = Client()
+
+    async def run() -> None:
+        await backend.delete_many(["file1.wav", "file2.wav"])
+
+    asyncio.run(run())
+    assert len(backend._client.calls) == 1
+    call = backend._client.calls[0]
+    assert call[1]["Bucket"] == "private-bucket"
+    assert call[1]["Delete"] == {
+        "Objects": [{"Key": "file1.wav"}, {"Key": "file2.wav"}],
+        "Quiet": True,
+    }
+

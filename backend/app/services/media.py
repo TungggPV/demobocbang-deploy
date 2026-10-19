@@ -196,10 +196,11 @@ class MediaService:
         media = await self._session.get(MediaFile, media_id)
         if media is None or media.meeting_id != meeting_id or media.deleted_at is not None:
             raise ApiError("MEDIA_NOT_FOUND", "Media was not found.", 404)
+        keys = [media.storage_key]
+        if media.normalized_storage_key is not None:
+            keys.append(media.normalized_storage_key)
         try:
-            await self._storage.delete(media.storage_key)
-            if media.normalized_storage_key is not None:
-                await self._storage.delete(media.normalized_storage_key)
+            await self._storage.delete_many(keys)
         except (OSError, StorageError) as exc:
             raise ApiError("MEDIA_STORAGE_ERROR", "Media could not be deleted.", 502) from exc
         pending_jobs = await self._session.scalars(
@@ -221,15 +222,19 @@ class MediaService:
         media_files = await self._session.scalars(
             select(MediaFile).where(MediaFile.meeting_id == meeting_id)
         )
-        try:
-            for media in media_files:
-                await self._storage.delete(media.storage_key)
-                if media.normalized_storage_key is not None:
-                    await self._storage.delete(media.normalized_storage_key)
-        except (OSError, StorageError) as exc:
-            raise ApiError(
-                "MEDIA_STORAGE_ERROR", "Meeting media could not be deleted.", 502
-            ) from exc
+        keys: list[str] = []
+        for media in media_files:
+            if media.storage_key:
+                keys.append(media.storage_key)
+            if media.normalized_storage_key:
+                keys.append(media.normalized_storage_key)
+        if keys:
+            try:
+                await self._storage.delete_many(keys)
+            except (OSError, StorageError) as exc:
+                raise ApiError(
+                    "MEDIA_STORAGE_ERROR", "Meeting media could not be deleted.", 502
+                ) from exc
 
     async def get_job(self, job_id: UUID, user: User) -> JobResponse:
         job = await self._session.get(Job, job_id)

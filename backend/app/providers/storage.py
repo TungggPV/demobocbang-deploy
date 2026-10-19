@@ -24,6 +24,7 @@ class StorageNotFoundError(StorageError):
 class StorageBackend(Protocol):
     async def put_file(self, source: Path, key: str) -> None: ...
     async def delete(self, key: str) -> None: ...
+    async def delete_many(self, keys: list[str]) -> None: ...
     async def put_bytes(self, content: bytes, key: str) -> None: ...
     async def get_bytes(self, key: str) -> bytes: ...
     async def get_range(self, key: str, start: int, end: int) -> bytes: ...
@@ -50,6 +51,11 @@ class LocalStorageBackend:
         path = self._path_for(key)
         if path.exists():
             await asyncio.to_thread(path.unlink)
+
+    async def delete_many(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        await asyncio.gather(*(self.delete(k) for k in keys), return_exceptions=True)
 
     async def put_bytes(self, content: bytes, key: str) -> None:
         destination = self._path_for(key)
@@ -106,6 +112,17 @@ class S3StorageBackend:
 
     async def delete(self, key: str) -> None:
         await self._call(self._client.delete_object, Bucket=self._bucket_name, Key=key)
+
+    async def delete_many(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        for i in range(0, len(keys), 1000):
+            chunk = keys[i : i + 1000]
+            await self._call(
+                self._client.delete_objects,
+                Bucket=self._bucket_name,
+                Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True},
+            )
 
     async def put_bytes(self, content: bytes, key: str) -> None:
         await self._call(self._client.put_object, Bucket=self._bucket_name, Key=key, Body=content)
@@ -233,20 +250,29 @@ class DatabaseStorageBackend:
         await asyncio.to_thread(destination.write_bytes, data)
 
     async def delete(self, key: str) -> None:
-        query = text("DELETE FROM storage_blobs WHERE storage_key = :key")
+        await self.delete_many([key])
+
+    async def delete_many(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        from sqlalchemy import delete
+        from app.models.media import StorageBlob
+
+        stmt = delete(StorageBlob).where(StorageBlob.storage_key.in_(keys))
         try:
             async with self._engine.begin() as conn:
-                await conn.execute(query, {"key": key})
+                await conn.execute(stmt)
         except Exception as exc:
             raise StorageError("Database storage delete operation failed.") from exc
 
         if self._local_root:
-            local_path = self._local_root / key
-            if local_path.exists():
-                try:
-                    await asyncio.to_thread(local_path.unlink)
-                except OSError:
-                    pass
+            for key in keys:
+                local_path = self._local_root / key
+                if local_path.exists():
+                    try:
+                        await asyncio.to_thread(local_path.unlink)
+                    except OSError:
+                        pass
 
     async def presigned_get_url(self, key: str, expires_in: int, **_: object) -> str | None:
         return None

@@ -90,12 +90,10 @@ async def delete_meeting(
     media_service: MediaServiceDependency,
     export_service: ExportServiceDependency,
 ) -> Response:
-    # Check ownership before touching storage, then let database cascades remove
-    # media/job records after all associated object keys have been purged.
-    await service.require_access(meeting_id, user, "owner")
+    meeting, _ = await service.require_access(meeting_id, user, "owner")
     await media_service.purge_meeting_storage(meeting_id)
     await export_service.purge_meeting_storage(meeting_id)
-    await service.delete(meeting_id, user)
+    await service.delete(meeting_id, user, meeting=meeting)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

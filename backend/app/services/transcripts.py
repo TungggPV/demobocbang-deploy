@@ -508,14 +508,14 @@ class TranscriptService:
             if legacy is not None:
                 meeting = await self._session.get(Meeting, legacy.meeting_id)
                 assert meeting is not None
-                await self._meetings.require_access(meeting.id, user, MeetingPermission.EDIT)
+                await self._meetings.require_meeting_access(meeting, user, MeetingPermission.EDIT)
                 self._require_projection(legacy)
             raise ApiError("SEGMENT_NOT_FOUND", "Transcript segment was not found.", 404)
         transcript = await self._session.get(Transcript, segment.transcript_id)
         assert transcript is not None
         meeting = await self._session.scalar(select(Meeting).where(Meeting.id == transcript.meeting_id).with_for_update())
         assert meeting is not None
-        await self._meetings.require_access(meeting.id, user, MeetingPermission.EDIT)
+        await self._meetings.require_meeting_access(meeting, user, MeetingPermission.EDIT)
         self._require_projection(transcript)
         return meeting, segment, transcript
 
@@ -526,14 +526,14 @@ class TranscriptService:
 
     async def _new_user_version(self, meeting: Meeting, transcript: Transcript, user: User) -> TranscriptVersion:
         parent = await self._current_version(meeting)
-        version = TranscriptVersion(transcript_id=transcript.id, version_no=await self._next_version_no(transcript.id), source=TranscriptVersionSource.USER_EDIT, parent_version_id=parent.id, created_by=user.id)
+        next_v = (parent.version_no + 1) if (parent and parent.version_no is not None) else await self._next_version_no(transcript.id)
+        version = TranscriptVersion(transcript_id=transcript.id, version_no=next_v, source=TranscriptVersionSource.USER_EDIT, parent_version_id=parent.id, created_by=user.id)
         self._session.add(version)
         await self._session.flush()
         return version
 
     async def _event(self, transcript: Transcript, version: TranscriptVersion, actor_id: UUID, event_type: str, payload: dict[str, object]) -> None:
         self._session.add(TranscriptEditEvent(transcript_id=transcript.id, version_id=version.id, actor_id=actor_id, event_order=1, event_type=event_type, payload=payload))
-        await self._session.flush()
 
     async def _finish_mutation(self, meeting: Meeting, transcript: Transcript, version: TranscriptVersion, segment: CurrentSegment | None) -> TranscriptMutationResponse:
         event_count = int(await self._session.scalar(select(func.count(TranscriptEditEvent.id)).where(TranscriptEditEvent.transcript_id == transcript.id)) or 0)
@@ -582,7 +582,7 @@ class TranscriptService:
         self, logical_id: UUID, user: User, operation: Callable[[list[dict[str, object]], int], object]
     ) -> TranscriptMutationResponse:
         meeting, _, version = await self._current_segment_with_meeting(logical_id, user)
-        await self._meetings.require_access(meeting.id, user, MeetingPermission.EDIT)
+        await self._meetings.require_meeting_access(meeting, user, MeetingPermission.EDIT)
         items = [self._copy_data(item) for item in await self._segments(version.id)]
         index = next(index for index, item in enumerate(items) if item["logical_segment_id"] == logical_id)
         operation(items, index)
@@ -590,8 +590,9 @@ class TranscriptService:
 
     async def _save_snapshot(self, meeting: Meeting, parent: TranscriptVersion, actor_id: UUID, items: list[dict[str, object]], changed_index: int | None) -> TranscriptMutationResponse:
         self._validate_segments(items)
+        next_v = (parent.version_no + 1) if (parent and parent.version_no is not None) else await self._next_version_no(parent.transcript_id)
         next_version = TranscriptVersion(
-            transcript_id=parent.transcript_id, version_no=await self._next_version_no(parent.transcript_id),
+            transcript_id=parent.transcript_id, version_no=next_v,
             source=TranscriptVersionSource.USER_EDIT, parent_version_id=parent.id, created_by=actor_id,
         )
         self._session.add(next_version)
@@ -627,7 +628,7 @@ class TranscriptService:
         assert transcript is not None
         meeting = await self._session.get(Meeting, transcript.meeting_id)
         assert meeting is not None
-        await self._meetings.require_access(meeting.id, user, MeetingPermission.READ)
+        await self._meetings.require_meeting_access(meeting, user, MeetingPermission.READ)
         return meeting, segment, version
 
     async def _current_version(self, meeting: Meeting) -> TranscriptVersion:
