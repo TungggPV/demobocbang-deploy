@@ -139,7 +139,7 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
       actions={<>
         {editable && <Button onClick={() => setRenameOpen(true)}>Đổi tên</Button>}
         {meeting.data.source_type === "upload" && <a className="btn btn-light" href={`/meetings/${meetingId}/upload`}>Tải tệp</a>}
-        {owner && <Button tone="dark" onClick={() => setShareOpen(true)}>Chia sẻ</Button>}
+        {owner && <Button tone="dark" onClick={() => setShareOpen(true)}>Gửi qua email</Button>}
       </>}
     />
     {notice && <div className="notice">{notice}</div>}
@@ -324,7 +324,7 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     </div>
 
     {renameOpen && <RenameMeetingDialog title={meeting.data.title} close={() => setRenameOpen(false)} confirm={async (title) => { const updated = await meetingsApi.update(meetingId, { title }); meeting.setData(updated); setRenameOpen(false); setNotice("Đã đổi tên bản ghi."); }} />}
-    {shareOpen && <ShareDialog meetingId={meetingId} close={() => setShareOpen(false)} />}
+    {shareOpen && <ShareDialog meetingId={meetingId} title={meeting.data.title} close={() => setShareOpen(false)} />}
     {pendingSplit && <SplitDialog segment={pendingSplit} close={() => setPendingSplit(undefined)} confirm={(splitAt, first, second) => { const segment = pendingSplit; setPendingSplit(undefined); void mutate(() => meetingsApi.splitSegment(segment.logical_segment_id, splitAt, first, second), "Đã tách đoạn và tạo phiên bản mới."); }} />}
     {pendingMerge && <ConfirmDialog title={`Gộp ${pendingMerge.length} đoạn?`} detail="Các đoạn đã chọn sẽ được nối theo đúng thứ tự thời gian thành một đoạn." confirmLabel="Gộp đoạn" close={() => setPendingMerge(undefined)} confirm={() => { const selected = pendingMerge; setPendingMerge(undefined); setMergeIds([]); void mutate(() => meetingsApi.mergeSegments(selected.map((segment) => segment.logical_segment_id)), `Đã gộp ${selected.length} đoạn và tạo phiên bản mới.`); }} />}
     {pendingDelete && <ConfirmDialog title="Xóa đoạn transcript?" detail="Đoạn đã xóa sẽ không còn trong phiên bản transcript hiện hành." confirmLabel="Xóa đoạn" close={() => setPendingDelete(undefined)} confirm={() => { const segment = pendingDelete; setPendingDelete(undefined); void mutate(() => meetingsApi.deleteSegment(segment.logical_segment_id), "Đã xóa đoạn và tạo phiên bản mới.", segment.logical_segment_id); }} />}
@@ -469,7 +469,7 @@ function SplitDialog({ segment, close, confirm }: { segment: Segment; close: () 
   </div>;
 }
 
-function ShareDialog({ meetingId, close }: { meetingId: string; close: () => void }) {
+function ShareDialog({ meetingId, title, close }: { meetingId: string; title: string; close: () => void }) {
   const choices: Array<{ value: EmailAttachmentChoice; label: string; detail: string }> = [
     { value: "audio", label: "Băng ghi âm", detail: "Tệp âm thanh gốc" },
     { value: "transcript", label: "Nội dung bóc băng", detail: "Văn bản kèm thời gian và người nói" },
@@ -477,55 +477,97 @@ function ShareDialog({ meetingId, close }: { meetingId: string; close: () => voi
     { value: "translation", label: "Bản dịch", detail: "Bản dịch mới nhất" },
   ];
   const [email, setEmail] = useState("");
-  const [permission, setPermission] = useState<"read" | "comment" | "edit">("read");
   const [attachments, setAttachments] = useState<EmailAttachmentChoice[]>(["transcript"]);
   const [message, setMessage] = useState("");
   const [success, setSuccess] = useState(false);
   const [sending, setSending] = useState(false);
-  const [shareLink, setShareLink] = useState("");
-  const [copyNotice, setCopyNotice] = useState(false);
-
-  useEffect(() => {
-    meetingsApi.createShare(meetingId, permission).then((res) => {
-      setShareLink(`${window.location.origin}/share/${res.token}`);
-    }).catch(() => {});
-  }, [meetingId, permission]);
+  const [copied, setCopied] = useState(false);
 
   function toggleAttachment(value: EmailAttachmentChoice) {
     setAttachments((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
   }
 
-  async function copyLink() {
-    if (!shareLink) return;
+  async function generateEmailContent() {
+    const sections: string[] = [];
+    if (attachments.includes("summary")) {
+      const summaries = await meetingsApi.summaries(meetingId).catch(() => []);
+      const latest = summaries[summaries.length - 1];
+      if (latest?.current_version?.content) {
+        const text = Object.entries(latest.current_version.content)
+          .map(([k, v]) => `${k}:\n${Array.isArray(v) ? v.join("\n") : typeof v === "object" ? JSON.stringify(v, null, 2) : String(v ?? "")}`)
+          .join("\n\n");
+        sections.push(`📌 TÓM TẮT CUỘC HỌP:\n${text}`);
+      }
+    }
+    if (attachments.includes("translation")) {
+      const translations = await meetingsApi.translations(meetingId).catch(() => []);
+      const latest = translations[translations.length - 1];
+      if (latest?.segments?.length) {
+        const transLines = latest.segments.map((s) => s.text).join("\n");
+        sections.push(`🌐 BẢN DỊCH:\n${transLines}`);
+      }
+    }
+    if (attachments.includes("transcript")) {
+      const transcriptData = await meetingsApi.transcript(meetingId).catch(() => null);
+      if (transcriptData?.segments?.length) {
+        const transLines = transcriptData.segments
+          .map((s) => `[${formatTime(s.start_ms)}] ${s.speaker_label ? s.speaker_label + ": " : ""}${s.text}`)
+          .join("\n");
+        sections.push(`📝 NỘI DUNG BÓC BĂNG:\n${transLines}`);
+      }
+    }
+    if (attachments.includes("audio")) {
+      sections.push(`🎙️ BĂNG GHI ÂM:\nBạn có thể nghe và tải bản ghi âm tại:\n${window.location.origin}/meetings/${meetingId}`);
+    }
+    const emailSubject = `[Bóc Băng] Tài liệu cuộc họp: ${title}`;
+    let emailBody = `Xin chào,\n\nDưới đây là tài liệu cuộc họp "${title}":\n\n`;
+    emailBody += sections.join("\n\n" + "─".repeat(32) + "\n\n");
+    emailBody += `\n\n${"─".repeat(32)}\nTrân trọng,\nBóc Băng AI`;
+    return { emailSubject, emailBody };
+  }
+
+  async function copyContent() {
+    if (attachments.length === 0) {
+      setMessage("Vui lòng chọn ít nhất một tệp đính kèm cần gửi.");
+      setSuccess(false);
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(shareLink);
-      setCopyNotice(true);
-      window.setTimeout(() => setCopyNotice(false), 2500);
+      setSending(true);
+      const { emailBody } = await generateEmailContent();
+      await navigator.clipboard.writeText(emailBody);
+      setCopied(true);
+      setSuccess(true);
+      setMessage("Đã sao chép nội dung email vào bộ nhớ tạm.");
+      window.setTimeout(() => setCopied(false), 2500);
     } catch {
-      setMessage("Không thể sao chép liên kết.");
+      setSuccess(false);
+      setMessage("Không thể sao chép vào bộ nhớ tạm.");
+    } finally {
+      setSending(false);
     }
   }
 
-  const mailtoHref = shareLink ? `mailto:${encodeURIComponent(email.trim())}?subject=${encodeURIComponent("Mời tham gia cuộc họp trên Bóc Băng")}&body=${encodeURIComponent("Xin chào,\n\nTôi mời bạn tham gia và xem nội dung cuộc họp tại liên kết sau:\n" + shareLink + "\n\nTrân trọng!")}` : "";
-
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!email.trim()) return;
+    const recipient = email.trim();
+    if (!recipient) return;
+    if (attachments.length === 0) {
+      setMessage("Vui lòng chọn ít nhất một tệp đính kèm cần gửi.");
+      setSuccess(false);
+      return;
+    }
     try {
       setSending(true);
       setMessage("");
-      await meetingsApi.addMember(meetingId, email.trim(), permission, attachments);
+      const { emailSubject, emailBody } = await generateEmailContent();
+      const mailtoUrl = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
+      window.location.href = mailtoUrl;
       setSuccess(true);
-      setMessage(`Đã cấp quyền truy cập thành công cho ${email.trim()}.`);
-      setEmail("");
+      setMessage(`Đang mở ứng dụng email để gửi tài liệu tới “${recipient}”.`);
     } catch (cause) {
       setSuccess(false);
-      const errMsg = (cause as Error)?.message || "";
-      if (errMsg.includes("No user exists") || errMsg.includes("USER_NOT_FOUND")) {
-        setMessage(`Email “${email.trim()}” chưa có tài khoản trên hệ thống. Bạn có thể sao chép liên kết chia sẻ bên dưới để gửi trực tiếp cho họ qua Email nhé!`);
-      } else {
-        setMessage(meetingErrorMessage(cause));
-      }
+      setMessage(meetingErrorMessage(cause));
     } finally {
       setSending(false);
     }
@@ -535,35 +577,21 @@ function ShareDialog({ meetingId, close }: { meetingId: string; close: () => voi
     <div className="dialog-backdrop">
       <section className="dialog" role="dialog" aria-modal="true" style={{ width: 540, maxWidth: "94vw" }}>
         <button className="close" onClick={close} type="button">×</button>
-        <h2>Chia sẻ cuộc họp</h2>
-        <p>Tạo liên kết chia sẻ hoặc mời thành viên qua email.</p>
-
-        {shareLink && (
-          <div style={{ background: "var(--card-bg, #1a1e28)", padding: 12, borderRadius: 10, border: "1px solid var(--border)", marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-              <strong style={{ fontSize: 13 }}>Liên kết chia sẻ trực tiếp ({permission === "read" ? "Chỉ xem" : permission === "comment" ? "Xem & bình luận" : "Chỉnh sửa"})</strong>
-              {copyNotice && <span style={{ fontSize: 12, color: "var(--accent, #10b981)" }}>✓ Đã sao chép</span>}
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input readOnly value={shareLink} style={{ flex: 1, fontSize: 12, padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)" }} />
-              <Button onClick={() => void copyLink()} tone="dark">Sao chép</Button>
-            </div>
-          </div>
-        )}
+        <h2>Gửi tài liệu qua Email</h2>
+        <p>Gửi các tệp đính kèm đã chọn trực tiếp tới email người nhận.</p>
 
         <form onSubmit={submit}>
           <label className="field">
             Email người nhận
-            <input required type="email" placeholder="dongnghiep@congty.com" value={email} onChange={(event) => setEmail(event.target.value)} />
+            <input
+              required
+              type="email"
+              placeholder="dongnghiep@congty.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+            />
           </label>
-          <label className="field">
-            Quyền hạn
-            <select value={permission} onChange={(event) => setPermission(event.target.value as typeof permission)}>
-              <option value="read">Xem (Chỉ đọc)</option>
-              <option value="comment">Bình luận</option>
-              <option value="edit">Chỉnh sửa</option>
-            </select>
-          </label>
+
           <div className="field">
             <span>Tệp đính kèm gửi qua email</span>
             <div className="share-attachment-options">
@@ -585,16 +613,16 @@ function ShareDialog({ meetingId, close }: { meetingId: string; close: () => voi
               })}
             </div>
           </div>
+
           {message && <div className={success ? "notice" : "form-error"}>{message}</div>}
-          <div className="dialog-actions" style={{ flexWrap: "wrap", gap: 8 }}>
-            <Button onClick={close}>Đóng</Button>
-            {email.trim() && mailtoHref && (
-              <a className="btn btn-light" href={mailtoHref} target="_blank" rel="noopener noreferrer">
-                Mở ứng dụng Email
-              </a>
-            )}
+
+          <div className="dialog-actions" style={{ flexWrap: "wrap", gap: 8, justifyContent: "flex-end" }}>
+            <Button onClick={close} type="button">Đóng</Button>
+            <Button onClick={() => void copyContent()} type="button" disabled={sending}>
+              {copied ? "✓ Đã sao chép" : "Sao chép nội dung"}
+            </Button>
             <Button type="submit" tone="dark" disabled={sending}>
-              {sending ? "Đang xử lý…" : "Cấp quyền thành viên"}
+              {sending ? "Đang chuẩn bị…" : "Gửi qua Email"}
             </Button>
           </div>
         </form>
