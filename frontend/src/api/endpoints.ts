@@ -46,7 +46,12 @@ export const meetingsApi = {
   saveSegment: (id: string, body: { text?: string; start_ms?: number; end_ms?: number }) => apiClient.patch<TranscriptMutation>(`/segments/${id}`, body),
   deleteSegment: (id: string) => apiClient.delete<TranscriptMutation>(`/segments/${id}`),
   splitSegment: (id: string, split_at_ms: number, first_text?: string, second_text?: string) => apiClient.post<TranscriptMutation>(`/segments/${id}/split`, { split_at_ms, first_text, second_text }),
-  mergeSegments: (segment_ids: string[]) => apiClient.post<TranscriptMutation>("/segments/merge", { segment_ids }),
+  mergeSegments: (segment_ids: string[]) =>
+    apiClient.post<TranscriptMutation>("/segments/merge", {
+      segment_ids,
+      first_segment_id: segment_ids[0],
+      second_segment_id: segment_ids[1],
+    }),
   speakers: (id: string) => apiClient.get<Speaker[]>(`/meetings/${id}/speakers`),
   updateSpeaker: (id: string, body: Partial<Speaker>) => apiClient.patch<Speaker>(`/speakers/${id}`, body),
   deleteSpeaker: (id: string) => apiClient.delete<void>(`/speakers/${id}`),

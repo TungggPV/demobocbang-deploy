@@ -120,18 +120,64 @@ class TranscriptService:
     async def merge_segments(
         self, payload: SegmentMergeRequest, user: User
     ) -> TranscriptMutationResponse:
-        meeting, first, transcript = await self._projection_context(payload.first_segment_id, user)
-        second = await self._session.scalar(select(CurrentSegment).where(CurrentSegment.logical_segment_id == payload.second_segment_id).with_for_update())
-        if second is None or second.transcript_id != transcript.id or not await self._are_adjacent(first, second):
-            raise ApiError("SEGMENTS_NOT_MERGEABLE", "Segments must be adjacent in the current transcript.", 422)
-        if first.speaker_id != second.speaker_id or first.end_ms != second.start_ms:
-            raise ApiError("SEGMENTS_NOT_MERGEABLE", "Segments must be contiguous and have the same speaker.", 422)
+        ids = payload.segment_ids or ([payload.first_segment_id, payload.second_segment_id] if payload.first_segment_id and payload.second_segment_id else [])
+        if not ids or len(ids) < 2:
+            raise ApiError("SEGMENTS_NOT_MERGEABLE", "Cần ít nhất hai đoạn để gộp.", 422)
+
+        meeting, first, transcript = await self._projection_context(ids[0], user)
+        other_ids = [seg_id for seg_id in ids if seg_id != first.logical_segment_id]
+        others = list(
+            await self._session.scalars(
+                select(CurrentSegment)
+                .where(
+                    CurrentSegment.transcript_id == transcript.id,
+                    CurrentSegment.logical_segment_id.in_(other_ids),
+                )
+                .order_by(CurrentSegment.position)
+                .with_for_update()
+            )
+        )
+        if len(others) != len(set(other_ids)):
+            raise ApiError("SEGMENTS_NOT_MERGEABLE", "Một hoặc nhiều đoạn không tồn tại trong transcript.", 422)
+
+        all_selected = [first] + others
+        all_selected.sort(key=lambda s: s.position)
+
+        min_pos = all_selected[0].position
+        max_pos = all_selected[-1].position
+        count_in_between = await self._session.scalar(
+            select(func.count(CurrentSegment.id)).where(
+                CurrentSegment.transcript_id == transcript.id,
+                CurrentSegment.position >= min_pos,
+                CurrentSegment.position <= max_pos,
+            )
+        )
+        if count_in_between != len(all_selected):
+            raise ApiError("SEGMENTS_NOT_MERGEABLE", "Các đoạn cần gộp phải nằm liền kề nhau trong transcript.", 422)
+
         version = await self._new_user_version(meeting, transcript, user)
-        first.end_ms = second.end_ms
-        first.text = f"{first.text.rstrip()} {second.text.lstrip()}".strip()
-        await self._session.delete(second)
-        await self._event(transcript, version, user.id, "segments_merged", {"first_logical_segment_id": str(first.logical_segment_id), "second_logical_segment_id": str(second.logical_segment_id), "end_ms": first.end_ms, "text": first.text})
-        return await self._finish_mutation(meeting, transcript, version, first)
+        primary = all_selected[0]
+        primary.end_ms = max(s.end_ms for s in all_selected)
+        merged_text = " ".join(s.text.strip() for s in all_selected if s.text.strip())
+        primary.text = merged_text
+
+        for seg in all_selected[1:]:
+            await self._session.delete(seg)
+
+        await self._event(
+            transcript,
+            version,
+            user.id,
+            "segments_merged",
+            {
+                "first_logical_segment_id": str(all_selected[0].logical_segment_id),
+                "second_logical_segment_id": str(all_selected[1].logical_segment_id),
+                "merged_segment_ids": [str(s.logical_segment_id) for s in all_selected],
+                "end_ms": primary.end_ms,
+                "text": primary.text,
+            },
+        )
+        return await self._finish_mutation(meeting, transcript, version, primary)
 
     async def list_speakers(self, meeting_id: UUID, user: User) -> list[SpeakerResponse]:
         await self._meetings.require_access(meeting_id, user, MeetingPermission.READ)

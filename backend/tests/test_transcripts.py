@@ -84,6 +84,27 @@ def test_edit_split_merge_delete_and_version_creation(tmp_path: Path) -> None:
         assert len(client.get(f"/api/v1/meetings/{seeded['meeting_id']}/transcript", headers=headers).json()["segments"]) == 1
 
 
+def test_merge_with_segment_ids_array(tmp_path: Path) -> None:
+    app, sender, url = _app(tmp_path)
+    with TestClient(app) as client:
+        owner = _session(client, sender, "array-merge@example.com")
+        seeded = _seed(url, UUID(owner["user"]["id"]))
+        headers = _headers(owner)
+        # Split first segment to have 3 segments total
+        client.post(f"/api/v1/segments/{seeded['first']}/split", headers=headers, json={"split_at_ms": 500, "first_text": "Part 1", "second_text": "Part 2"})
+        current = client.get(f"/api/v1/meetings/{seeded['meeting_id']}/transcript", headers=headers).json()
+        assert len(current["segments"]) == 3
+        all_ids = [seg["logical_segment_id"] for seg in current["segments"]]
+        
+        # Merge all 3 segments in one shot via segment_ids
+        merged = client.post("/api/v1/segments/merge", headers=headers, json={"segment_ids": all_ids})
+        assert merged.status_code == 200
+        after = client.get(f"/api/v1/meetings/{seeded['meeting_id']}/transcript", headers=headers).json()
+        assert len(after["segments"]) == 1
+        assert after["segments"][0]["text"] == "Part 1 Part 2 Second segment"
+        assert after["segments"][0]["end_ms"] == 2000
+
+
 def test_speaker_assignment_and_edit_permissions(tmp_path: Path) -> None:
     app, sender, url = _app(tmp_path)
     with TestClient(app) as client:

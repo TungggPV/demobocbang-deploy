@@ -118,8 +118,18 @@ class SegmentSplitRequest(BaseModel):
 
 
 class SegmentMergeRequest(BaseModel):
-    first_segment_id: UUID
-    second_segment_id: UUID
+    first_segment_id: UUID | None = None
+    second_segment_id: UUID | None = None
+    segment_ids: list[UUID] | None = None
+
+    @model_validator(mode="after")
+    def validate_segments(self) -> SegmentMergeRequest:
+        if self.segment_ids is not None and len(self.segment_ids) >= 2:
+            return self
+        if self.first_segment_id is not None and self.second_segment_id is not None:
+            self.segment_ids = [self.first_segment_id, self.second_segment_id]
+            return self
+        raise ValueError("Cần cung cấp ít nhất 2 đoạn để gộp.")
 
 
 class SegmentSpeakerRequest(BaseModel):

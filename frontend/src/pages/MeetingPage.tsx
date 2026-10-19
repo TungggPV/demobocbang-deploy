@@ -326,7 +326,7 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     {renameOpen && <RenameMeetingDialog title={meeting.data.title} close={() => setRenameOpen(false)} confirm={async (title) => { const updated = await meetingsApi.update(meetingId, { title }); meeting.setData(updated); setRenameOpen(false); setNotice("Đã đổi tên bản ghi."); }} />}
     {shareOpen && <ShareDialog meetingId={meetingId} title={meeting.data.title} close={() => setShareOpen(false)} />}
     {pendingSplit && <SplitDialog segment={pendingSplit} close={() => setPendingSplit(undefined)} confirm={(splitAt, first, second) => { const segment = pendingSplit; setPendingSplit(undefined); void mutate(() => meetingsApi.splitSegment(segment.logical_segment_id, splitAt, first, second), "Đã tách đoạn và tạo phiên bản mới."); }} />}
-    {pendingMerge && <ConfirmDialog title={`Gộp ${pendingMerge.length} đoạn?`} detail="Các đoạn đã chọn sẽ được nối theo đúng thứ tự thời gian thành một đoạn." confirmLabel="Gộp đoạn" close={() => setPendingMerge(undefined)} confirm={() => { const selected = pendingMerge; setPendingMerge(undefined); setMergeIds([]); void mutate(() => meetingsApi.mergeSegments(selected.map((segment) => segment.logical_segment_id)), `Đã gộp ${selected.length} đoạn và tạo phiên bản mới.`); }} />}
+    {pendingMerge && <ConfirmDialog title={`Gộp ${pendingMerge.length} đoạn?`} detail="Các đoạn đã chọn sẽ được nối theo đúng thứ tự thời gian thành một đoạn." confirmLabel="Gộp đoạn" close={() => setPendingMerge(undefined)} confirm={() => { const selected = [...pendingMerge].sort((a, b) => a.start_ms - b.start_ms); setPendingMerge(undefined); setMergeIds([]); void mutate(() => meetingsApi.mergeSegments(selected.map((segment) => segment.logical_segment_id)), `Đã gộp ${selected.length} đoạn và tạo phiên bản mới.`); }} />}
     {pendingDelete && <ConfirmDialog title="Xóa đoạn transcript?" detail="Đoạn đã xóa sẽ không còn trong phiên bản transcript hiện hành." confirmLabel="Xóa đoạn" close={() => setPendingDelete(undefined)} confirm={() => { const segment = pendingDelete; setPendingDelete(undefined); void mutate(() => meetingsApi.deleteSegment(segment.logical_segment_id), "Đã xóa đoạn và tạo phiên bản mới.", segment.logical_segment_id); }} />}
   </>;
 }
@@ -469,7 +469,7 @@ function SplitDialog({ segment, close, confirm }: { segment: Segment; close: () 
   </div>;
 }
 
-function ShareDialog({ meetingId, title, close }: { meetingId: string; title: string; close: () => void }) {
+export function ShareDialog({ meetingId, title, close }: { meetingId: string; title: string; close: () => void }) {
   const choices: Array<{ value: EmailAttachmentChoice; label: string; detail: string }> = [
     { value: "audio", label: "Băng ghi âm", detail: "Tệp âm thanh gốc" },
     { value: "transcript", label: "Nội dung bóc băng", detail: "Văn bản kèm thời gian và người nói" },

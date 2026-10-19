@@ -305,79 +305,557 @@ def _render(format: ExportFormat, data: dict[str, object]) -> bytes:
         return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     if format in (ExportFormat.SRT, ExportFormat.VTT):
         return _subtitles(data, format).encode("utf-8")
-    text = _plain_text(data)
     if format == ExportFormat.TXT:
-        return text.encode("utf-8")
+        return _plain_text(data).encode("utf-8")
     if format == ExportFormat.DOCX:
-        from docx import Document
+        return _render_docx(data)
+    if format == ExportFormat.PDF:
+        return _render_pdf(data)
+    raise ValueError(f"Unsupported format: {format}")
 
-        document = Document()
-        document.add_heading(str(data["meeting"]["title"]), 0)
-        for line in text.splitlines():
-            document.add_paragraph(line)
-        buffer = io.BytesIO()
-        document.save(buffer)
-        return buffer.getvalue()
+
+def _render_pdf(data: dict[str, object]) -> bytes:
+    import html
+    from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.pdfmetrics import registerFontFamily
     from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.pdfgen.canvas import Canvas
+    from reportlab.pdfgen import canvas
+    from reportlab.platypus import (
+        HRFlowable,
+        KeepTogether,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
 
-    # DejaVu is shipped by many Linux images; failure is a stable failed job rather than mojibake.
-    font = next(
+    reg_font = next(
         (
-            path
-            for path in (
+            p
+            for p in [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                 "C:/Windows/Fonts/arial.ttf",
-            )
-            if os.path.exists(path)
+                "C:/Windows/Fonts/segoeui.ttf",
+            ]
+            if os.path.exists(p)
         ),
         None,
     )
-    if font is None:
+    bold_font = next(
+        (
+            p
+            for p in [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "C:/Windows/Fonts/arialbd.ttf",
+                "C:/Windows/Fonts/segoeuib.ttf",
+            ]
+            if os.path.exists(p)
+        ),
+        None,
+    )
+    italic_font = next(
+        (
+            p
+            for p in [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+                "C:/Windows/Fonts/ariali.ttf",
+                "C:/Windows/Fonts/segoeuii.ttf",
+            ]
+            if os.path.exists(p)
+        ),
+        None,
+    )
+
+    if reg_font is None:
         raise ValueError("A Unicode PDF font is not configured.")
-    pdfmetrics.registerFont(TTFont("ExportUnicode", font))
-    buffer = io.BytesIO()
-    canvas = Canvas(buffer, pagesize=A4)
-    canvas.setFont("ExportUnicode", 11)
-    y = 800
-    for line in text.splitlines():
-        for part in _wrap(line, 95):
-            canvas.drawString(42, y, part)
-            y -= 15
-            if y < 42:
-                canvas.showPage()
-                canvas.setFont("ExportUnicode", 11)
-                y = 800
-    canvas.save()
-    return buffer.getvalue()
+
+    font_name = "ExportDocFont"
+    if font_name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(font_name, reg_font))
+        pdfmetrics.registerFont(TTFont(f"{font_name}-Bold", bold_font or reg_font))
+        pdfmetrics.registerFont(TTFont(f"{font_name}-Italic", italic_font or reg_font))
+        registerFontFamily(
+            font_name,
+            normal=font_name,
+            bold=f"{font_name}-Bold",
+            italic=f"{font_name}-Italic",
+            boldItalic=f"{font_name}-Bold",
+        )
+
+    class NumberedCanvas(canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._saved_page_states = []
+
+        def showPage(self):
+            self._saved_page_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            num_pages = len(self._saved_page_states)
+            for state in self._saved_page_states:
+                self.__dict__.update(state)
+                self.draw_page_decorations(num_pages)
+                super().showPage()
+            super().save()
+
+        def draw_page_decorations(self, page_count):
+            self.saveState()
+            self.setFont(font_name, 8)
+            self.setFillColor(colors.HexColor("#64748b"))
+            self.setStrokeColor(colors.HexColor("#e2e8f0"))
+            self.setLineWidth(0.5)
+            self.line(40, 36, 555, 36)
+            self.drawString(40, 24, "Bóc Băng AI — Hệ thống bóc băng & ghi âm thông minh")
+            self.drawRightString(555, 24, f"Trang {self._pageNumber} / {page_count}")
+            self.restoreState()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, leftMargin=40, rightMargin=40, topMargin=36, bottomMargin=50
+    )
+
+    styles = getSampleStyleSheet()
+    brand_style = ParagraphStyle(
+        "DocBrand",
+        parent=styles["Normal"],
+        fontName=f"{font_name}-Bold",
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#4f46e5"),
+    )
+    title_style = ParagraphStyle(
+        "DocTitle",
+        parent=styles["Normal"],
+        fontName=f"{font_name}-Bold",
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#0f172a"),
+    )
+    meta_lbl = ParagraphStyle(
+        "MetaLbl",
+        parent=styles["Normal"],
+        fontName=f"{font_name}-Bold",
+        fontSize=8.5,
+        leading=12,
+        textColor=colors.HexColor("#64748b"),
+    )
+    meta_val = ParagraphStyle(
+        "MetaVal",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=8.5,
+        leading=12,
+        textColor=colors.HexColor("#0f172a"),
+    )
+    sec_style = ParagraphStyle(
+        "DocSec",
+        parent=styles["Normal"],
+        fontName=f"{font_name}-Bold",
+        fontSize=11,
+        leading=15,
+        textColor=colors.HexColor("#1e293b"),
+    )
+    speaker_style = ParagraphStyle(
+        "DocSpk",
+        parent=styles["Normal"],
+        fontName=f"{font_name}-Bold",
+        fontSize=9.5,
+        leading=13,
+        textColor=colors.HexColor("#2563eb"),
+    )
+    body_style = ParagraphStyle(
+        "DocBody",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=9.5,
+        leading=14.5,
+        textColor=colors.HexColor("#334155"),
+    )
+    trans_style = ParagraphStyle(
+        "DocTrans",
+        parent=styles["Normal"],
+        fontName=f"{font_name}-Italic",
+        fontSize=8.5,
+        leading=13,
+        textColor=colors.HexColor("#475569"),
+    )
+    summary_body = ParagraphStyle(
+        "SumBody",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=9,
+        leading=13.5,
+        textColor=colors.HexColor("#1e3a5f"),
+    )
+
+    story = []
+    meeting = data["meeting"]
+    title = str(meeting.get("title") or "Bản ghi cuộc họp")
+    lang_mode = str(meeting.get("language_mode") or "auto")
+    lang_label = {"vi": "Tiếng Việt", "en": "Tiếng Anh", "auto": "Tự động nhận diện"}.get(
+        lang_mode, lang_mode
+    )
+
+    story.append(Paragraph("BÓC BĂNG AI &nbsp;·&nbsp; TÀI LIỆU XUẤT BẢN GHI CUỘC HỌP", brand_style))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(f"<b>{html.escape(title)}</b>", title_style))
+    story.append(Spacer(1, 10))
+
+    unique_speakers = []
+    for item in data.get("segments", []):
+        spk = item.get("speaker")
+        if spk and spk not in unique_speakers:
+            unique_speakers.append(spk)
+    speakers_str = ", ".join(unique_speakers) if unique_speakers else "Tự động phân tách"
+    created_at = (
+        meeting.get("created_at", "")[:16].replace("T", " ") if meeting.get("created_at") else ""
+    )
+
+    meta_data = [
+        [
+            Paragraph("<b>Thời gian:</b>", meta_lbl),
+            Paragraph(html.escape(created_at) if created_at else "—", meta_val),
+            Paragraph("<b>Ngôn ngữ:</b>", meta_lbl),
+            Paragraph(html.escape(lang_label), meta_val),
+        ],
+        [
+            Paragraph("<b>Số đoạn:</b>", meta_lbl),
+            Paragraph(f"{len(data.get('segments', []))} đoạn", meta_val),
+            Paragraph("<b>Người nói:</b>", meta_lbl),
+            Paragraph(html.escape(speakers_str), meta_val),
+        ],
+    ]
+    meta_table = Table(meta_data, colWidths=[70, 185, 75, 185])
+    meta_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#e2e8f0")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#f1f5f9")),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    story.append(meta_table)
+    story.append(Spacer(1, 14))
+
+    if data.get("summary"):
+        summary_content = data["summary"]
+        story.append(Paragraph("<b>TÓM TẮT CUỘC HỌP</b>", sec_style))
+        story.append(Spacer(1, 4))
+        story.append(
+            HRFlowable(
+                width="100%",
+                thickness=0.5,
+                color=colors.HexColor("#e2e8f0"),
+                spaceBefore=2,
+                spaceAfter=8,
+            )
+        )
+
+        summary_paragraphs = []
+        if isinstance(summary_content, dict):
+            for k, v in summary_content.items():
+                k_label = {
+                    "summary": "Tóm tắt",
+                    "overview": "Tổng quan",
+                    "key_points": "Các ý chính",
+                    "action_items": "Hành động tiếp theo",
+                    "decisions": "Quyết định",
+                }.get(k, k.capitalize())
+                if isinstance(v, list):
+                    summary_paragraphs.append(Paragraph(f"<b>{html.escape(k_label)}:</b>", meta_lbl))
+                    for sub in v:
+                        summary_paragraphs.append(
+                            Paragraph(f"• {html.escape(str(sub))}", summary_body)
+                        )
+                elif isinstance(v, str):
+                    summary_paragraphs.append(
+                        Paragraph(f"<b>{html.escape(k_label)}:</b> {html.escape(v)}", summary_body)
+                    )
+        elif isinstance(summary_content, str):
+            summary_paragraphs.append(Paragraph(html.escape(summary_content), summary_body))
+
+        if summary_paragraphs:
+            sum_table = Table([[p] for p in summary_paragraphs], colWidths=[515])
+            sum_table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f0fdf4")),
+                        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#bbf7d0")),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                    ]
+                )
+            )
+            story.append(sum_table)
+            story.append(Spacer(1, 14))
+
+    story.append(Paragraph("<b>NỘI DUNG CHI TIẾT BẢN GHI</b>", sec_style))
+    story.append(Spacer(1, 4))
+    story.append(
+        HRFlowable(
+            width="100%",
+            thickness=0.75,
+            color=colors.HexColor("#e2e8f0"),
+            spaceBefore=2,
+            spaceAfter=10,
+        )
+    )
+
+    include_timestamps = data.get("options", {}).get("include_timestamps", True)
+    include_speakers = data.get("options", {}).get("include_speakers", True)
+
+    for item in data.get("segments", []):
+        time_part = ""
+        if include_timestamps:
+            t_start = _format_human_time(item["start_ms"])
+            t_end = _format_human_time(item["end_ms"])
+            time_part = f'<font color="#64748b" size="8">[{t_start} - {t_end}]</font>'
+
+        spk_part = ""
+        if include_speakers and item.get("speaker"):
+            spk_part = f'<b>{html.escape(str(item["speaker"]))}</b>'
+        elif include_speakers:
+            spk_part = '<font color="#94a3b8">Chưa xác định</font>'
+
+        header_html = f"{spk_part} &nbsp; {time_part}".strip()
+        text_html = html.escape(str(item.get("text", ""))).replace("\n", "<br/>")
+
+        block = []
+        if header_html:
+            block.append(Paragraph(header_html, speaker_style))
+            block.append(Spacer(1, 3))
+        block.append(Paragraph(text_html, body_style))
+
+        if item.get("translation"):
+            trans_html = html.escape(str(item["translation"])).replace("\n", "<br/>")
+            block.append(Spacer(1, 3))
+            block.append(Paragraph(f"<b>Bản dịch:</b> {trans_html}", trans_style))
+
+        block.append(Spacer(1, 8))
+        story.append(KeepTogether(block))
+
+    doc.build(story, canvasmaker=NumberedCanvas)
+    return buf.getvalue()
+
+
+def _render_docx(data: dict[str, object]) -> bytes:
+    from docx import Document
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    from docx.shared import Inches, Pt, RGBColor
+
+    doc = Document()
+    for section in doc.sections:
+        section.top_margin = Inches(0.8)
+        section.bottom_margin = Inches(0.8)
+        section.left_margin = Inches(0.8)
+        section.right_margin = Inches(0.8)
+
+    p_brand = doc.add_paragraph()
+    r_brand = p_brand.add_run("BÓC BĂNG AI · TÀI LIỆU XUẤT BẢN GHI CUỘC HỌP")
+    r_brand.font.size = Pt(8.5)
+    r_brand.font.bold = True
+    r_brand.font.color.rgb = RGBColor(0x4F, 0x46, 0xE5)
+
+    meeting = data["meeting"]
+    title = str(meeting.get("title") or "Bản ghi cuộc họp")
+    h = doc.add_heading(level=0)
+    run_h = h.add_run(title)
+    run_h.font.size = Pt(18)
+    run_h.font.bold = True
+    run_h.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
+
+    lang_mode = str(meeting.get("language_mode") or "auto")
+    lang_label = {"vi": "Tiếng Việt", "en": "Tiếng Anh", "auto": "Tự động nhận diện"}.get(
+        lang_mode, lang_mode
+    )
+    created_at = (
+        meeting.get("created_at", "")[:16].replace("T", " ") if meeting.get("created_at") else ""
+    )
+
+    table = doc.add_table(rows=2, cols=4)
+    table.autofit = False
+    metadata = [
+        [("Thời gian:", True), (created_at or "—", False), ("Ngôn ngữ:", True), (lang_label, False)],
+        [
+            ("Số đoạn:", True),
+            (f"{len(data.get('segments', []))} đoạn", False),
+            ("Người nói:", True),
+            ("Tự động phân tách", False),
+        ],
+    ]
+    for row_idx, row_data in enumerate(metadata):
+        row = table.rows[row_idx]
+        for col_idx, (text, is_bold) in enumerate(row_data):
+            cell = row.cells[col_idx]
+            shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="F8FAFC"/>')
+            cell._tc.get_or_add_tcPr().append(shd)
+            p = cell.paragraphs[0]
+            run = p.add_run(text)
+            run.font.size = Pt(9)
+            run.font.bold = is_bold
+            if is_bold:
+                run.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
+            else:
+                run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
+
+    doc.add_paragraph()
+
+    if data.get("summary"):
+        h_sum = doc.add_heading(level=1)
+        r_sum = h_sum.add_run("TÓM TẮT CUỘC HỌP")
+        r_sum.font.size = Pt(13)
+        r_sum.font.bold = True
+        r_sum.font.color.rgb = RGBColor(0x1E, 0x29, 0x3B)
+
+        summary_content = data["summary"]
+        if isinstance(summary_content, dict):
+            for k, v in summary_content.items():
+                k_label = {
+                    "summary": "Tóm tắt",
+                    "overview": "Tổng quan",
+                    "key_points": "Các ý chính",
+                    "action_items": "Hành động tiếp theo",
+                    "decisions": "Quyết định",
+                }.get(k, k.capitalize())
+                p_k = doc.add_paragraph()
+                r_k = p_k.add_run(f"{k_label}:")
+                r_k.font.bold = True
+                if isinstance(v, list):
+                    for sub in v:
+                        p_sub = doc.add_paragraph(style="List Bullet")
+                        p_sub.add_run(str(sub))
+                elif isinstance(v, str):
+                    p_k.add_run(f" {v}")
+        elif isinstance(summary_content, str):
+            doc.add_paragraph(summary_content)
+
+        doc.add_paragraph()
+
+    h_sec = doc.add_heading(level=1)
+    run_sec = h_sec.add_run("NỘI DUNG CHI TIẾT BẢN GHI")
+    run_sec.font.size = Pt(13)
+    run_sec.font.bold = True
+    run_sec.font.color.rgb = RGBColor(0x1E, 0x29, 0x3B)
+
+    include_timestamps = data.get("options", {}).get("include_timestamps", True)
+    include_speakers = data.get("options", {}).get("include_speakers", True)
+
+    for item in data.get("segments", []):
+        time_part = ""
+        if include_timestamps:
+            t_start = _format_human_time(item["start_ms"])
+            t_end = _format_human_time(item["end_ms"])
+            time_part = f"[{t_start} - {t_end}]"
+
+        spk_part = ""
+        if include_speakers and item.get("speaker"):
+            spk_part = str(item["speaker"])
+        elif include_speakers:
+            spk_part = "Chưa xác định"
+
+        p_meta = doc.add_paragraph()
+        p_meta.paragraph_format.space_before = Pt(6)
+        p_meta.paragraph_format.space_after = Pt(2)
+        if spk_part:
+            r_spk = p_meta.add_run(spk_part)
+            r_spk.font.bold = True
+            r_spk.font.size = Pt(10)
+            r_spk.font.color.rgb = RGBColor(0x25, 0x63, 0xEB)
+        if time_part:
+            r_time = p_meta.add_run(f"  {time_part}")
+            r_time.font.size = Pt(9)
+            r_time.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
+
+        p_text = doc.add_paragraph()
+        p_text.paragraph_format.space_before = Pt(0)
+        p_text.paragraph_format.space_after = Pt(4)
+        r_text = p_text.add_run(str(item.get("text", "")))
+        r_text.font.size = Pt(10)
+        r_text.font.color.rgb = RGBColor(0x33, 0x41, 0x55)
+
+        if item.get("translation"):
+            p_trans = doc.add_paragraph()
+            p_trans.paragraph_format.space_before = Pt(0)
+            p_trans.paragraph_format.space_after = Pt(4)
+            r_tl = p_trans.add_run("Bản dịch: ")
+            r_tl.font.bold = True
+            r_tl.font.size = Pt(9)
+            r_tl.font.color.rgb = RGBColor(0x05, 0x96, 0x69)
+            r_tv = p_trans.add_run(str(item["translation"]))
+            r_tv.font.italic = True
+            r_tv.font.size = Pt(9)
+            r_tv.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 def _plain_text(data: dict[str, object]) -> str:
     meeting = data["meeting"]
-    lines = [str(meeting["title"]), "", f"Language: {meeting['language_mode']}"]
+    title = str(meeting.get("title") or "Bản ghi cuộc họp")
+    lang_mode = str(meeting.get("language_mode") or "auto")
+    created_at = (
+        meeting.get("created_at", "")[:16].replace("T", " ") if meeting.get("created_at") else ""
+    )
+
+    lines = [
+        "=" * 50,
+        f"BẢN GHI CUỘC HỌP: {title}",
+        f"Thời gian: {created_at} | Ngôn ngữ: {lang_mode}",
+        "=" * 50,
+        "",
+    ]
     if meeting.get("description"):
-        lines.append(str(meeting["description"]))
-    for item in data["segments"]:
-        prefix = (
-            f"[{_timestamp(item['start_ms'])} - {_timestamp(item['end_ms'])}] "
-            if data["options"]["include_timestamps"]
-            else ""
-        )
-        if item.get("speaker"):
-            prefix += f"{item['speaker']}: "
-        lines.append(prefix + str(item["text"]))
-        if item.get("translation"):
-            lines.append(f"  Translation: {item['translation']}")
+        lines.extend([str(meeting["description"]), ""])
+
     if data.get("summary"):
-        lines.extend(["", "Summary", json.dumps(data["summary"], ensure_ascii=False)])
+        lines.extend(["--- TÓM TẮT CUỘC HỌP ---"])
+        summary_content = data["summary"]
+        if isinstance(summary_content, dict):
+            for k, v in summary_content.items():
+                if isinstance(v, list):
+                    lines.append(f"{k}:")
+                    for sub in v:
+                        lines.append(f"  • {sub}")
+                else:
+                    lines.append(f"{k}: {v}")
+        else:
+            lines.append(str(summary_content))
+        lines.append("")
+
+    lines.append("--- NỘI DUNG CHI TIẾT ---")
+    include_timestamps = data.get("options", {}).get("include_timestamps", True)
+    include_speakers = data.get("options", {}).get("include_speakers", True)
+
+    for item in data.get("segments", []):
+        prefix = ""
+        if include_timestamps:
+            prefix += f"[{_format_human_time(item['start_ms'])} - {_format_human_time(item['end_ms'])}] "
+        if include_speakers and item.get("speaker"):
+            prefix += f"{item['speaker']}: "
+        lines.append(prefix + str(item.get("text", "")))
+        if item.get("translation"):
+            lines.append(f"  Bản dịch: {item['translation']}")
     return "\n".join(lines) + "\n"
 
 
 def _subtitles(data: dict[str, object], format: ExportFormat) -> str:
     lines = ["WEBVTT", ""] if format == ExportFormat.VTT else []
-    for index, item in enumerate(data["segments"], start=1):
+    for index, item in enumerate(data.get("segments", []), start=1):
         if format == ExportFormat.SRT:
             lines.append(str(index))
         separator = "." if format == ExportFormat.VTT else ","
@@ -385,7 +863,7 @@ def _subtitles(data: dict[str, object], format: ExportFormat) -> str:
             f"{_timestamp(item['start_ms'], separator)} --> {_timestamp(item['end_ms'], separator)}"
         )
         label = f"{item['speaker']}: " if item.get("speaker") else ""
-        lines.append(label + str(item["text"]))
+        lines.append(label + str(item.get("text", "")))
         lines.append("")
     return "\n".join(lines)
 
@@ -398,10 +876,16 @@ def _timestamp(value: object, separator: str = ".") -> str:
     return f"{hours:02}:{minutes:02}:{seconds:02}{separator}{ms:03}"
 
 
+def _format_human_time(value: object) -> str:
+    ms = int(value)
+    hours, ms = divmod(ms, 3_600_000)
+    minutes, ms = divmod(ms, 60_000)
+    seconds, _ = divmod(ms, 1000)
+    if hours > 0:
+        return f"{hours:02}:{minutes:02}:{seconds:02}"
+    return f"{minutes:02}:{seconds:02}"
+
+
 def _filename(title: str, format: ExportFormat) -> str:
     stem = re.sub(r"[^\w.-]+", "-", title, flags=re.UNICODE).strip(".-") or "meeting"
     return f"{stem}.{format.value}"
-
-
-def _wrap(value: str, width: int) -> list[str]:
-    return [value[index : index + width] for index in range(0, len(value), width)] or [""]
