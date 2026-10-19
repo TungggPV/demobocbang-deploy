@@ -42,11 +42,11 @@ export function UploadPage({ meetingId }: { meetingId: string }) {
   const terminal = job?.status === "completed" || job?.status === "failed";
   if (meeting.loading) return <Loading />;
   if (meeting.error || !meeting.data) return <Failure error={meeting.error ?? new Error("Không tìm thấy cuộc họp.")} retry={meeting.reload} />;
-  if (meeting.data.source_type !== "upload") return <><PageHeading eyebrow="TẢI TỆP" title="Không thể tải tệp" context={meeting.data.title} /><Empty title="Sai loại cuộc họp" detail="Tạo cuộc họp ở chế độ tải tệp." action={<a className="btn btn-dark" href="/meetings/create?mode=upload">Tạo mới</a>} /></>;
+  if (meeting.data.source_type !== "upload") return <><PageHeading title="Không thể tải tệp" context={meeting.data.title} /><Empty title="Sai loại cuộc họp" detail="Tạo cuộc họp ở chế độ tải tệp." action={<a className="btn btn-dark" href="/meetings/create?mode=upload">Tạo mới</a>} /></>;
   const editable = can(meeting.data.permission, "edit");
 
   return <>
-    <PageHeading eyebrow="TẢI TỆP" title="Tải bản ghi" context={meeting.data.title} description={`Tối đa ${Math.round(config.maxUploadBytes / 1024 / 1024)} MB · ${config.maxMediaDurationSeconds / 3600} giờ`} />
+    <PageHeading title="Tải bản ghi" context={meeting.data.title} description={`Tối đa ${Math.round(config.maxUploadBytes / 1024 / 1024)} MB · ${config.maxMediaDurationSeconds / 3600} giờ`} />
     {!editable && <div className="notice">Bạn chỉ có quyền xem. Cần quyền chỉnh sửa để tải tệp âm thanh.</div>}
     <section aria-disabled={!editable || Boolean(job)} className={`upload-zone ${job || !editable ? "is-disabled" : ""}`} onClick={() => editable && !job && !uploading && input.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); choose(event.dataTransfer.files[0]); }}>
       <div className="upload-mark">↑</div><div><strong>{file?.name ?? "Thả tệp vào đây"}</strong><p>Âm thanh hoặc video</p></div><Button disabled={!editable || Boolean(job) || uploading}>Chọn tệp</Button><input ref={input} disabled={!editable || Boolean(job) || uploading} hidden type="file" accept={accepted.map((extension) => `.${extension}`).join(",")} onChange={(event) => choose(event.target.files?.[0])} />

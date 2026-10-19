@@ -5,7 +5,6 @@ import { useAsync } from "../hooks/useAsync";
 import { useJobMonitor } from "../state/useJobMonitor";
 import type { ExportArtifact, ExportFormat, Permission } from "../types/domain";
 import { Button, Failure, Loading, PageHeading, Panel, statusLabel } from "../components/ui";
-import { ShareDialog } from "./MeetingPage";
 
 const formats: Array<{
   value: ExportFormat;
@@ -39,7 +38,6 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
   const [shareUrl, setShareUrl] = useState("");
   const [copied, setCopied] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [emailOpen, setEmailOpen] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -112,7 +110,7 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
 
   return (
     <>
-      <PageHeading eyebrow="XUẤT & CHIA SẺ" title="Xuất tệp & Chia sẻ" context={currentMeeting.title} />
+      <PageHeading title="Xuất tệp & Chia sẻ" context={currentMeeting.title} />
       {notice && <div className="notice">{notice}</div>}
       {error && <div className="form-error">{error}</div>}
       <div className="export-layout">
@@ -269,36 +267,8 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
               </div>
             )}
           </Panel>
-
-          <Panel className="export-side-details">
-            <h2>Thông tin bản ghi</h2>
-            <p className="muted">Chi tiết bản ghi sẽ được đóng gói vào tài liệu xuất.</p>
-            <dl>
-              <dt>Tên bản ghi</dt>
-              <dd>{currentMeeting.title}</dd>
-              <dt>Ngôn ngữ</dt>
-              <dd>
-                {currentMeeting.language_mode === "vi"
-                  ? "Tiếng Việt"
-                  : currentMeeting.language_mode === "en"
-                  ? "Tiếng Anh"
-                  : "Tự động nhận diện"}
-              </dd>
-              <dt>Phân đoạn</dt>
-              <dd>{transcript.data?.segments.length ?? 0} đoạn</dd>
-              <dt>Phương thức</dt>
-              <dd>{currentMeeting.source_type === "realtime" ? "Ghi âm trực tiếp" : "Tải tệp âm thanh"}</dd>
-            </dl>
-
-            <div className="export-side-email-box">
-              <p>Cần gửi trực tiếp tài liệu đính kèm qua hòm thư cho đồng nghiệp?</p>
-              <Button onClick={() => setEmailOpen(true)}>Gửi tài liệu qua Email</Button>
-            </div>
-          </Panel>
         </div>
       </div>
-
-      {emailOpen && <ShareDialog meetingId={meetingId} title={currentMeeting.title} close={() => setEmailOpen(false)} />}
     </>
   );
 }

@@ -143,9 +143,24 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     ...(transcript.data?.segments.map((segment) => segment.end_ms) ?? [0]),
   );
 
+  const refreshMedia = useCallback(async () => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const items = await meetingsApi.media(meetingId);
+        if (items && items.length > 0) {
+          media.setData(items);
+          return;
+        }
+      } catch {
+        // ignore
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    void media.reload();
+  }, [meetingId, media]);
+
   return <>
     <PageHeading
-      eyebrow="BẢN GHI"
       title="Bản ghi"
       context={meeting.data.title}
       description={`${languageLabel(meeting.data.language_mode)} · ${meeting.data.source_type === "realtime" ? "Ghi âm" : "Tệp"}`}
@@ -171,7 +186,7 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
             onTranscript={(event) => setLiveTranscript((current) => updateLiveTranscript(current, event))}
             onResetTranscript={() => setLiveTranscript((current) => Object.fromEntries(Object.entries(current).filter(([, event]) => event.type === "transcript.final")))}
             onFinal={() => { void transcript.reload(); void speakers.reload(); void versions.reload(); }}
-            onComplete={() => { void meeting.reload(); void transcript.reload(); void media.reload(); }}
+            onComplete={() => { void meeting.reload(); void transcript.reload(); void refreshMedia(); }}
             onRecordingStateChange={updateRecordingState}
             hasStartedBefore={transcript.data?.segments !== undefined && transcript.data.segments.length > 0}
             initialElapsedMs={initialRecordingDurationMs}

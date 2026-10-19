@@ -2,7 +2,7 @@ import { useState } from "react";
 import { meetingsApi, voiceProfilesApi } from "../api/endpoints";
 import { useAsync } from "../hooks/useAsync";
 import { can } from "../utils/permissions";
-import { Button, Empty, Failure, Loading, PageHeading, Panel } from "../components/ui";
+import { Button, Empty, Failure, Icon, Loading, PageHeading, Panel } from "../components/ui";
 import type { VoiceProfile } from "../types/domain";
 
 type SpeakerView = {
@@ -28,6 +28,7 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
   });
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [createModalOpen, setCreateModalOpen] = useState(false);
   const [deletingSpeaker, setDeletingSpeaker] = useState<SpeakerView | null>(null);
 
   if (meeting.loading) return <Loading />;
@@ -70,6 +71,7 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
       speakers.setData((items) => [...(items ?? []), item]);
       setDraft({ name: "", role: "", organization: "", voice_profile_id: "" });
       setError("");
+      setCreateModalOpen(false);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -93,6 +95,19 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
         title="Người nói"
         context={meeting.data.title}
         description="Danh sách người nói được thiết lập riêng cho cuộc họp này. Các mẫu giọng dùng chung đã lưu sẽ được tự động nhận diện cho cuộc họp; bạn có thể tùy chỉnh tên, vai trò và đơn vị tại đây mà không ảnh hưởng mẫu giọng gốc."
+        actions={
+          editable ? (
+            <Button
+              tone="dark"
+              onClick={() => {
+                setError("");
+                setCreateModalOpen(true);
+              }}
+            >
+              <Icon name="plus" /> Thêm người nói
+            </Button>
+          ) : undefined
+        }
       />
 
       <div className="speakers-layout">
@@ -115,15 +130,40 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
           {speakers.data && !speakers.data.length && (
             <Empty
               title="Chưa có người nói"
-              detail="Người nói sẽ được tự động nhận diện từ mẫu giọng hoặc diarization khi ghi âm/tải tệp, hoặc bạn có thể thêm thủ công bên cạnh."
+              detail="Người nói sẽ được tự động nhận diện từ mẫu giọng hoặc diarization khi ghi âm/tải tệp, hoặc bạn có thể thêm người nói thủ công."
+              action={
+                editable ? (
+                  <Button
+                    tone="dark"
+                    onClick={() => {
+                      setError("");
+                      setCreateModalOpen(true);
+                    }}
+                  >
+                    <Icon name="plus" /> Thêm người nói
+                  </Button>
+                ) : undefined
+              }
             />
           )}
         </section>
+      </div>
 
-        {editable && (
-          <Panel className="speaker-create">
+      {createModalOpen && (
+        <div className="dialog-backdrop">
+          <section className="dialog" role="dialog" style={{ maxWidth: 480 }}>
+            <button
+              className="close"
+              onClick={() => {
+                setCreateModalOpen(false);
+                setError("");
+              }}
+              type="button"
+            >
+              ×
+            </button>
             <h2>Thêm người nói</h2>
-            <p style={{ fontSize: 13, color: "var(--muted-color, #64748b)", margin: "4px 0 16px" }}>
+            <p className="muted" style={{ margin: "4px 0 16px" }}>
               Thêm người tham gia riêng cho cuộc họp này.
             </p>
             <form onSubmit={create}>
@@ -137,9 +177,9 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
                       width: "100%",
                       padding: "8px 10px",
                       borderRadius: 6,
-                      border: "1px solid var(--border-color, #cbd5e1)",
+                      border: "1px solid var(--border)",
                       fontSize: 14,
-                      background: "transparent",
+                      background: "var(--surface)",
                     }}
                   >
                     <option value="">-- Nhập thủ công hoặc chọn mẫu giọng --</option>
@@ -159,6 +199,7 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
                   value={draft.name}
                   onChange={(event) => setDraft({ ...draft, name: event.target.value })}
                   placeholder="Ví dụ: Nguyễn Văn A"
+                  autoFocus
                 />
               </label>
               <label className="field">
@@ -180,13 +221,16 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
                 />
               </label>
               {error && <div className="form-error">{error}</div>}
-              <Button type="submit" tone="dark" disabled={creating || !draft.name.trim()}>
-                {creating ? "Đang thêm…" : "Thêm người nói"}
-              </Button>
+              <div className="dialog-actions" style={{ marginTop: 16 }}>
+                <Button onClick={() => setCreateModalOpen(false)}>Hủy</Button>
+                <Button type="submit" tone="dark" disabled={creating || !draft.name.trim()}>
+                  {creating ? "Đang thêm…" : "Thêm người nói"}
+                </Button>
+              </div>
             </form>
-          </Panel>
-        )}
-      </div>
+          </section>
+        </div>
+      )}
 
       {/* Confirmation modal for delete speaker */}
       {deletingSpeaker && (

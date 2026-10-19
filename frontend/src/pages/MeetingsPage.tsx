@@ -65,7 +65,6 @@ function MeetingsOverview() {
 
   return <>
     <PageHeading
-      eyebrow="CUỘC HỌP"
       title="Cuộc họp"
       actions={<div className="quick-actions">
         <a className="btn btn-dark" href="/meetings/create"><Icon name="meeting" /> Ghi âm mới</a>

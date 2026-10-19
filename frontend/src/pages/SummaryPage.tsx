@@ -69,7 +69,6 @@ export function SummaryPage({ meetingId }: { meetingId: string }) {
 
   return <>
     <PageHeading
-      eyebrow="TÓM TẮT"
       title="Tóm tắt"
       context={meeting.data.title}
     />
