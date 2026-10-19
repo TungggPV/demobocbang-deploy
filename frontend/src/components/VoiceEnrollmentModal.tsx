@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Button, Icon } from "./ui";
+import { translateErrorMessage } from "../api/client";
 import { voiceProfilesApi } from "../api/endpoints";
 import type { VoiceProfile } from "../types/domain";
 
@@ -178,7 +179,7 @@ export function VoiceEnrollmentModal({
       onClose();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Không thể lưu mẫu giọng nói.";
-      setError(msg);
+      setError(translateErrorMessage(undefined, msg));
     } finally {
       setIsSubmitting(false);
     }

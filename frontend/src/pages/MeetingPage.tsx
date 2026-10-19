@@ -381,12 +381,16 @@ const MediaPlayer = forwardRef<AudioPlayerHandle, { meetingId: string; mediaId: 
       .catch((cause: Error) => {
         if (!active) return;
         const msg = cause.message || "";
-        if (msg.includes("Media is no longer available") || msg.includes("MEDIA_UNAVAILABLE")) {
+        if (
+          msg.includes("Media is no longer available") ||
+          msg.includes("MEDIA_UNAVAILABLE") ||
+          msg.includes("không còn trên máy chủ")
+        ) {
           setError(
-            "Tệp âm thanh này được tải lên trước khi kích hoạt lưu trữ đám mây nên không còn trên máy chủ. Toàn bộ nội dung văn bản bên dưới vẫn được lưu an toàn."
+            "Tệp âm thanh này được tạo từ phiên bản trước đó nên không còn trên máy chủ. Toàn bộ nội dung văn bản bên dưới vẫn được lưu an toàn."
           );
         } else {
-          setError(msg);
+          setError(msg || "Không thể tải tệp âm thanh. Vui lòng thử lại sau.");
         }
       });
     return () => {

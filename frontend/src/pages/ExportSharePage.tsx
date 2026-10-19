@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { translateErrorMessage } from "../api/client";
 import { capabilitiesApi, meetingsApi } from "../api/endpoints";
 import { useAsync } from "../hooks/useAsync";
 import { useJobMonitor } from "../state/useJobMonitor";
@@ -155,7 +156,7 @@ export function ExportSharePage({ meetingId }: { meetingId: string }) {
             <div className={`job-state ${jobs.job.status}`}>
               {statusLabel(jobs.job.status)}
               {jobs.job.progress !== undefined ? ` · ${jobs.job.progress}%` : ""}
-              {jobs.job.error ? ` · ${jobs.job.error.message}` : ""}
+              {jobs.job.error ? ` · ${translateErrorMessage(jobs.job.error.code, jobs.job.error.message)}` : ""}
             </div>
           )}
           {artifact?.status === "completed" && (

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { translateErrorMessage } from "../api/client";
 import { voiceProfilesApi } from "../api/endpoints";
 import { useAsync } from "../hooks/useAsync";
 import { Button, Empty, Failure, Icon, Loading, PageHeading } from "../components/ui";
@@ -90,7 +91,7 @@ function SampleAudioBar({
       .catch((err: unknown) => {
         if (!active) return;
         const msg = err instanceof Error ? err.message : "Không tìm thấy file âm thanh.";
-        setError(msg);
+        setError(translateErrorMessage(undefined, msg));
         setLoading(false);
         if (onAudioMissing) {
           onAudioMissing(profileId);
@@ -316,7 +317,7 @@ export function VoiceProfilesPage() {
         }
       }
     } catch (cause) {
-      alert((cause as Error).message || "Không thể xóa người nói.");
+      alert(translateErrorMessage(undefined, (cause as Error).message) || "Không thể xóa người nói.");
     } finally {
       setDeletingId(null);
     }
@@ -348,7 +349,7 @@ export function VoiceProfilesPage() {
       }
       setConfirmDeleteSample(null);
     } catch (err: unknown) {
-      alert((err as Error).message || "Không thể xóa lần thu này.");
+      alert(translateErrorMessage(undefined, (err as Error).message) || "Không thể xóa lần thu này.");
     } finally {
       setDeletingSample(false);
     }
