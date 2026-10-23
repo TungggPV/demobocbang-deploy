@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, useMemo } from "react";
 import { useAuth } from "../auth/AuthContext";
 import { MeetingSocket, type RealtimeEvent } from "../realtime/meetingSocket";
 import { MicrophonePcmCapture } from "../realtime/microphonePcm";
@@ -7,49 +7,337 @@ import { recordRender } from "../realtime/diagnostics";
 import { capabilitiesApi, meetingsApi, type TranscriptMutation } from "../api/endpoints";
 import { ApiError } from "../api/client";
 import { useAsync } from "../hooks/useAsync";
+import { useJobMonitor } from "../state/useJobMonitor";
 import { can } from "../utils/permissions";
 import { languageLabel } from "../utils/language";
 import { formatTimestampInput, parseTimestampInput } from "../utils/time";
-import type { Comment, Segment } from "../types/domain";
-import { Button, Empty, Failure, Icon, Loading, PageHeading, Status } from "../components/ui";
+import type { ExportFormat, MediaFile, Meeting, Permission, Segment, Speaker, SummaryLanguage, SummaryTemplate, Transcript, Translation } from "../types/domain";
+import { Button, Empty, Failure, Icon, Loading, Status, statusLabel } from "../components/ui";
+import { ThemeToggle } from "../components/ThemeToggle";
+
+function formatVietnameseDateTime(dateStr?: string | Date) {
+  const d = dateStr ? new Date(dateStr) : new Date();
+  const dayNames = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"];
+  const dayName = dayNames[d.getDay()];
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${dayName}, ${dd}-${mm}-${yyyy} lúc ${hh}:${min}`;
+}
 
 type SegmentDraft = { text: string; startTime: string; endTime: string; speakerId: string };
-type AudioPlayerHandle = { seek: (milliseconds: number) => void };
-type MeetingTab = "info" | "comments" | "versions";
+type AudioPlayerHandle = {
+  playSegment: (startMs: number, endMs: number) => void;
+  seek: (milliseconds: number) => void;
+  play: () => void;
+  pause: () => void;
+  toggle: () => void;
+  toggleMute: () => boolean;
+};
 type RealtimeTranslation = { text: string; sourceLanguage: string; targetLanguage: string };
-type EmailAttachmentChoice = "audio" | "transcript" | "summary" | "translation";
+
+const SPEAKER_PALETTE = [
+  "#ec4899", // pink
+  "#ef4444", // coral/red
+  "#a855f7", // purple
+  "#3b82f6", // blue
+  "#0ea5e9", // sky
+  "#f59e0b", // amber
+  "#10b981", // emerald
+  "#6366f1", // indigo
+];
+
+function getSpeakerDisplay(
+  speakerId: string | undefined,
+  speakerLabel: string | undefined,
+  speakers: Speaker[] = []
+) {
+  const found = speakerId ? speakers.find((s) => s.id === speakerId) : undefined;
+  const rawName = found?.name || (speakerLabel ? `Speaker ${speakerLabel}` : "Không xác định");
+  const isUnknown = !found?.name && !speakerLabel;
+
+  if (isUnknown || rawName.toLowerCase().includes("không xác định") || rawName.toLowerCase().includes("chưa xác định")) {
+    return {
+      name: "Không xác định",
+      initial: "?",
+      color: "#18181b",
+    };
+  }
+
+  let hash = 0;
+  const str = found?.id || rawName;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+  const colorIndex = Math.abs(hash) % SPEAKER_PALETTE.length;
+  const color = SPEAKER_PALETTE[colorIndex];
+  let initial = "S";
+  if (!rawName.toLowerCase().startsWith("speaker") && !rawName.toLowerCase().startsWith("người nói")) {
+    initial = rawName.trim()[0]?.toUpperCase() || "S";
+  }
+
+  return {
+    name: rawName,
+    initial,
+    color,
+  };
+}
+
+function copyToClipboard(text: string): Promise<boolean> {
+  if (navigator?.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text).then(() => true).catch(() => fallbackCopy(text));
+  }
+  return Promise.resolve(fallbackCopy(text));
+}
+
+function fallbackCopy(text: string): boolean {
+  try {
+    const el = document.createElement("textarea");
+    el.value = text;
+    el.style.position = "fixed";
+    el.style.opacity = "0";
+    document.body.appendChild(el);
+    el.select();
+    const success = document.execCommand("copy");
+    document.body.removeChild(el);
+    return Boolean(success);
+  } catch {
+    return false;
+  }
+}
 
 export function MeetingPage({ meetingId }: { meetingId: string }) {
   const { user } = useAuth();
-  const meeting = useAsync(() => meetingsApi.get(meetingId), [meetingId]);
-  const transcript = useAsync(() => meetingsApi.transcript(meetingId), [meetingId]);
-  const media = useAsync(() => meetingsApi.media(meetingId), [meetingId]);
-  const speakers = useAsync(() => meetingsApi.speakers(meetingId), [meetingId]);
+
+  // Modals & Drawers state (declared early for lazy loading)
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [summaryDrawerOpen, setSummaryDrawerOpen] = useState(false);
+  const [speakersDrawerOpen, setSpeakersDrawerOpen] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [playbackMode, setPlaybackMode] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [shareSocialOpen, setShareSocialOpen] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [logAiOpen, setLogAiOpen] = useState(false);
+
+  // High-performance single-request bundle
+  const bundle = useAsync(() => meetingsApi.bundle(meetingId), [meetingId]);
+
+  const meeting: {
+    data: Meeting | undefined;
+    loading: boolean;
+    error: Error | undefined;
+    reload: () => Promise<void>;
+    setData: React.Dispatch<React.SetStateAction<Meeting | undefined>>;
+  } = {
+    data: bundle.data?.meeting,
+    loading: bundle.loading,
+    error: bundle.error,
+    reload: async () => {
+      try {
+        const nextMeeting = await meetingsApi.get(meetingId);
+        bundle.setData((prev) => (prev ? { ...prev, meeting: nextMeeting } : prev));
+      } catch {
+        // ignore
+      }
+    },
+    setData: (fnOrVal) => {
+      bundle.setData((prev) => {
+        if (!prev) return prev;
+        const nextMeeting = typeof fnOrVal === "function" ? (fnOrVal as any)(prev.meeting) : fnOrVal;
+        return { ...prev, meeting: nextMeeting };
+      });
+    },
+  };
+
+  const transcript: {
+    data: Transcript | undefined;
+    loading: boolean;
+    error: Error | undefined;
+    reload: () => Promise<void>;
+    setData: React.Dispatch<React.SetStateAction<Transcript | undefined>>;
+  } = {
+    data: bundle.data?.transcript ?? undefined,
+    loading: bundle.loading,
+    error: bundle.error,
+    reload: async () => {
+      try {
+        const nextTr = await meetingsApi.transcript(meetingId);
+        bundle.setData((prev) => (prev ? { ...prev, transcript: nextTr } : prev));
+      } catch {
+        // ignore
+      }
+    },
+    setData: (fnOrVal) => {
+      bundle.setData((prev) => {
+        if (!prev) return prev;
+        const nextTr = typeof fnOrVal === "function" ? (fnOrVal as any)(prev.transcript) : fnOrVal;
+        return { ...prev, transcript: nextTr };
+      });
+    },
+  };
+
+  const media: {
+    data: MediaFile[] | undefined;
+    loading: boolean;
+    error: Error | undefined;
+    reload: () => Promise<void>;
+    setData: React.Dispatch<React.SetStateAction<MediaFile[] | undefined>>;
+  } = {
+    data: bundle.data?.media,
+    loading: bundle.loading,
+    error: bundle.error,
+    reload: async () => {
+      try {
+        const nextMed = await meetingsApi.media(meetingId);
+        bundle.setData((prev) => (prev ? { ...prev, media: nextMed } : prev));
+      } catch {
+        // ignore
+      }
+    },
+    setData: (fnOrVal) => {
+      bundle.setData((prev) => {
+        if (!prev) return prev;
+        const nextMed = typeof fnOrVal === "function" ? (fnOrVal as any)(prev.media) : fnOrVal;
+        return { ...prev, media: nextMed };
+      });
+    },
+  };
+
+  const speakers: {
+    data: Speaker[] | undefined;
+    loading: boolean;
+    error: Error | undefined;
+    reload: () => Promise<void>;
+    setData: React.Dispatch<React.SetStateAction<Speaker[] | undefined>>;
+  } = {
+    data: bundle.data?.speakers,
+    loading: bundle.loading,
+    error: bundle.error,
+    reload: async () => {
+      try {
+        const nextSpk = await meetingsApi.speakers(meetingId);
+        bundle.setData((prev) => (prev ? { ...prev, speakers: nextSpk } : prev));
+      } catch {
+        // ignore
+      }
+    },
+    setData: (fnOrVal) => {
+      bundle.setData((prev) => {
+        if (!prev) return prev;
+        const nextSpk = typeof fnOrVal === "function" ? (fnOrVal as any)(prev.speakers) : fnOrVal;
+        return { ...prev, speakers: nextSpk };
+      });
+    },
+  };
+
+  const translations: {
+    data: Translation[] | undefined;
+    loading: boolean;
+    error: Error | undefined;
+    reload: () => Promise<void>;
+    setData: React.Dispatch<React.SetStateAction<Translation[] | undefined>>;
+  } = {
+    data: bundle.data?.translations,
+    loading: bundle.loading,
+    error: bundle.error,
+    reload: async () => {
+      try {
+        const nextTrans = await meetingsApi.translations(meetingId);
+        bundle.setData((prev) => (prev ? { ...prev, translations: nextTrans } : prev));
+      } catch {
+        // ignore
+      }
+    },
+    setData: (fnOrVal) => {
+      bundle.setData((prev) => {
+        if (!prev) return prev;
+        const nextTrans = typeof fnOrVal === "function" ? (fnOrVal as any)(prev.translations) : fnOrVal;
+        return { ...prev, translations: nextTrans };
+      });
+    },
+  };
+
+  // Lazy-load summaries only when summary drawer is open
+  const summaries = useAsync(
+    () => (summaryDrawerOpen ? meetingsApi.summaries(meetingId) : Promise.resolve([])),
+    [meetingId, summaryDrawerOpen]
+  );
+
   const capabilities = useAsync(capabilitiesApi.get, []);
-  const comments = useAsync(() => meetingsApi.comments(meetingId), [meetingId]);
   const versions = useAsync(() => meetingsApi.versions(meetingId), [meetingId]);
+
+  // Split view toggle (defaults to true)
+  const [showTranslationSplit, setShowTranslationSplit] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("bocbang_show_translation");
+      return saved !== null ? saved === "true" : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleTranslationSplit = useCallback(() => {
+    setShowTranslationSplit((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("bocbang_show_translation", String(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+
   const [editing, setEditing] = useState<Segment>();
   const [draft, setDraft] = useState<SegmentDraft>({ text: "", startTime: "00:00", endTime: "00:00", speakerId: "" });
   const [notice, setNotice] = useState("");
-  const [shareOpen, setShareOpen] = useState(false);
-  const [renameOpen, setRenameOpen] = useState(false);
   const [recordingActive, setRecordingActive] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState<LiveTranscript>({});
 
-  const updateRecordingState = useCallback((active: boolean) => {
-    setRecordingActive(active);
-    if (!active) setLiveTranscript((current) => finishLiveTranscript(current));
-  }, []);
 
+
+  // Segment operations
   const [pendingDelete, setPendingDelete] = useState<Segment>();
   const [pendingSplit, setPendingSplit] = useState<Segment>();
   const [mergeIds, setMergeIds] = useState<string[]>([]);
   const [pendingMerge, setPendingMerge] = useState<Segment[]>();
   const [activeSegmentId, setActiveSegmentId] = useState<string>();
-  const [activeTab, setActiveTab] = useState<MeetingTab>("info");
+  const [rowMenuOpenId, setRowMenuOpenId] = useState<string | null>(null);
+  const [rightRowMenuOpenId, setRightRowMenuOpenId] = useState<string | null>(null);
+
+  // Realtime translations
   const [realtimeTranslations, setRealtimeTranslations] = useState<Record<string, RealtimeTranslation>>({});
   const [showRealtimeTranslations, setShowRealtimeTranslations] = useState(false);
+
+  // Translation generation in split view
+  const translationJobs = useJobMonitor();
+  const [targetLang, setTargetLang] = useState<string>("en");
+  const [translationError, setTranslationError] = useState("");
+  const latestTranslation: Translation | undefined = translations.data?.[0];
+  const isTranslating = ["queued", "processing", "retrying"].includes(translationJobs.job?.status ?? "");
+
+  const triggerTranslation = useCallback(async () => {
+    if (!transcript.data?.segments.length) return;
+    try {
+      setTranslationError("");
+      const source = transcript.data?.language ?? meeting.data?.language_mode ?? "auto";
+      const job = await meetingsApi.translation(meetingId, source, targetLang);
+      translationJobs.track(job);
+    } catch (err) {
+      setTranslationError((err as Error).message);
+    }
+  }, [transcript.data?.segments.length, transcript.data?.language, meeting.data?.language_mode, meetingId, targetLang, translationJobs]);
+
   const player = useRef<AudioPlayerHandle>(null);
+
+  const updateRecordingState = useCallback((active: boolean) => {
+    setRecordingActive(active);
+    if (!active) setLiveTranscript((current) => finishLiveTranscript(current));
+  }, []);
 
   const refreshMedia = useCallback(async () => {
     for (let attempt = 0; attempt < 6; attempt++) {
@@ -69,19 +357,93 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
 
   useEffect(() => {
     const stored = new Set(transcript.data?.segments.map((segment) => segment.logical_segment_id));
-    setLiveTranscript((current) => Object.fromEntries(Object.entries(current).filter(
-      ([, event]) => event.type !== "transcript.final" || !stored.has(event.logical_segment_id),
-    )));
+    setLiveTranscript((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([, event]) => event.type !== "transcript.final" || !stored.has(event.logical_segment_id)
+        )
+      )
+    );
   }, [transcript.data]);
 
-  useEffect(() => { if (editing) setDraft({ text: editing.text, startTime: formatTimestampInput(editing.start_ms), endTime: formatTimestampInput(editing.end_ms), speakerId: editing.speaker_id ?? "" }); }, [editing]);
-  useEffect(() => { if (!activeSegmentId || editing) return; document.getElementById(`segment-${activeSegmentId}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [activeSegmentId, editing]);
-  useEffect(() => { if (activeTab === "comments") void comments.reload(); }, [activeTab, comments.reload]);
+  useEffect(() => {
+    if (editing) {
+      setDraft({
+        text: editing.text,
+        startTime: formatTimestampInput(editing.start_ms),
+        endTime: formatTimestampInput(editing.end_ms),
+        speakerId: editing.speaker_id ?? "",
+      });
+    }
+  }, [editing]);
+
+  const transcriptBottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!autoScroll || !activeSegmentId || editing) return;
+    document.getElementById(`segment-${activeSegmentId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [activeSegmentId, editing, autoScroll]);
+
+  useEffect(() => {
+    if (!autoScroll) return;
+    if (recordingActive || Object.keys(liveTranscript).length > 0) {
+      transcriptBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [liveTranscript, recordingActive, autoScroll]);
+
+  useEffect(() => {
+    if (translationJobs.job?.status === "completed") {
+      meetingsApi.invalidateBundle(meetingId);
+      void translations.reload();
+      void meetingsApi.translations(meetingId).then((data) => {
+        bundle.setData((prev) => (prev ? { ...prev, translations: data } : prev));
+      });
+    }
+  }, [translationJobs.job?.status, meetingId]);
+
+
+
+
+
+  // Support direct modal links (?modal=share, ?modal=export, ?modal=summary, ?modal=speakers)
+  useEffect(() => {
+    setPlaybackMode(false);
+  }, [meetingId]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const modal = params.get("modal");
+    if (modal === "share") setShareSocialOpen(true);
+    else if (modal === "export") setExportModalOpen(true);
+    else if (modal === "summary") setSummaryDrawerOpen(true);
+    else if (modal === "speakers") setSpeakersDrawerOpen(true);
+  }, [meeting.data?.id]);
+
+  // Click outside to close row menus
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (!(e.target as HTMLElement).closest(".dual-cell-actions")) {
+        setRowMenuOpenId(null);
+        setRightRowMenuOpenId(null);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
 
   function applyMutation(result: TranscriptMutation, removedId?: string) {
     transcript.setData((current) => {
       if (!current) return current;
-      return { ...current, version_id: result.version_id, version_no: result.version_no, segments: removedId ? current.segments.filter((segment) => segment.logical_segment_id !== removedId) : current.segments.map((segment) => segment.logical_segment_id === result.segment?.logical_segment_id ? result.segment : segment) };
+      return {
+        ...current,
+        version_id: result.version_id,
+        version_no: result.version_no,
+        segments: removedId
+          ? current.segments.filter((segment) => segment.logical_segment_id !== removedId)
+          : current.segments.map((segment) =>
+              segment.logical_segment_id === result.segment?.logical_segment_id ? result.segment : segment
+            ),
+      };
     });
     void versions.reload();
   }
@@ -108,7 +470,7 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
         segments: current.segments.map((s) =>
           s.logical_segment_id === segmentToSave.logical_segment_id
             ? { ...s, text, start_ms: startMs, end_ms: endMs, speaker_id: changedSpeaker ?? undefined }
-            : s,
+            : s
         ),
       };
     });
@@ -116,7 +478,10 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     try {
       const body: { text?: string; start_ms?: number; end_ms?: number } = {};
       if (segmentToSave.text !== text) body.text = text;
-      if (draft.startTime !== formatTimestampInput(segmentToSave.start_ms) || draft.endTime !== formatTimestampInput(segmentToSave.end_ms)) {
+      if (
+        draft.startTime !== formatTimestampInput(segmentToSave.start_ms) ||
+        draft.endTime !== formatTimestampInput(segmentToSave.end_ms)
+      ) {
         body.start_ms = startMs;
         body.end_ms = endMs;
       }
@@ -126,7 +491,7 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
       }
       void transcript.reload();
       void versions.reload();
-      setNotice("Đã lưu thay đổi và tạo phiên bản transcript mới.");
+      setNotice("Đã lưu thay đổi.");
     } catch (cause) {
       await transcript.reload();
       setNotice(meetingErrorMessage(cause));
@@ -135,10 +500,13 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
 
   async function handleSplit(segment: Segment, splitAt: number, first: string, second: string) {
     setPendingSplit(undefined);
-
-    // 1. Instant optimistic update
     const firstSegment: Segment = { ...segment, end_ms: splitAt, text: first };
-    const secondSegment: Segment = { ...segment, logical_segment_id: `temp-split-${Date.now()}`, start_ms: splitAt, text: second };
+    const secondSegment: Segment = {
+      ...segment,
+      logical_segment_id: `temp-split-${Date.now()}`,
+      start_ms: splitAt,
+      text: second,
+    };
 
     transcript.setData((current) => {
       if (!current) return current;
@@ -151,7 +519,7 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
 
     try {
       await meetingsApi.splitSegment(segment.logical_segment_id, splitAt, first, second);
-      setNotice("Đã tách đoạn và tạo phiên bản mới.");
+      setNotice("Đã tách đoạn thành công.");
       void transcript.reload();
       void versions.reload();
     } catch (cause) {
@@ -165,7 +533,6 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     setPendingMerge(undefined);
     setMergeIds([]);
 
-    // 1. Instant optimistic update
     const primaryId = sorted[0].logical_segment_id;
     const removedIds = new Set(sorted.slice(1).map((s) => s.logical_segment_id));
     const mergedSegment: Segment = {
@@ -184,8 +551,9 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
 
     try {
       await meetingsApi.mergeSegments(sorted.map((s) => s.logical_segment_id));
-      setNotice(`Đã gộp ${sorted.length} đoạn và tạo phiên bản mới.`);
+      setNotice(`Đã gộp ${sorted.length} đoạn thành công.`);
       void transcript.reload();
+      void translations.reload();
       void versions.reload();
     } catch (cause) {
       await transcript.reload();
@@ -197,13 +565,19 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
     if (removedId) {
       transcript.setData((current) => {
         if (!current) return current;
-        return { ...current, segments: current.segments.filter((segment) => segment.logical_segment_id !== removedId) };
+        return {
+          ...current,
+          segments: current.segments.filter((segment) => segment.logical_segment_id !== removedId),
+        };
       });
     }
     try {
       const result = await action();
       if (removedId) applyMutation(result, removedId);
-      else { await transcript.reload(); await versions.reload(); }
+      else {
+        await transcript.reload();
+        await versions.reload();
+      }
       setNotice(success);
     } catch (cause) {
       await transcript.reload();
@@ -212,616 +586,1574 @@ export function MeetingPage({ meetingId }: { meetingId: string }) {
   }
 
   function toggleMerge(segment: Segment) {
-    setMergeIds((current) => current.includes(segment.logical_segment_id) ? current.filter((id) => id !== segment.logical_segment_id) : [...current, segment.logical_segment_id]);
+    setMergeIds((current) =>
+      current.includes(segment.logical_segment_id)
+        ? current.filter((id) => id !== segment.logical_segment_id)
+        : [...current, segment.logical_segment_id]
+    );
   }
 
   function prepareMerge() {
-    const segments = transcript.data?.segments ?? [];
-    const selected = segments.filter((item) => mergeIds.includes(item.logical_segment_id));
+    const selected = orderedSegments.filter((item) => mergeIds.includes(item.logical_segment_id));
     if (selected.length < 2) return setNotice("Chọn ít nhất hai đoạn để gộp.");
-    const indexes = selected.map((item) => segments.findIndex((segment) => segment.logical_segment_id === item.logical_segment_id));
-    if (indexes.some((value, index) => index > 0 && value !== indexes[index - 1] + 1)) return setNotice("Các đoạn được chọn phải nằm liền nhau.");
+    const indexes = selected
+      .map((item) => orderedSegments.findIndex((segment) => segment.logical_segment_id === item.logical_segment_id))
+      .sort((a, b) => a - b);
+    for (let i = 1; i < indexes.length; i++) {
+      if (indexes[i] !== indexes[i - 1] + 1) {
+        return setNotice("Các đoạn được chọn phải nằm liền kề nhau.");
+      }
+    }
     setPendingMerge(selected);
   }
 
 
-  if (meeting.loading) return <Loading />;
-  if (meeting.error || !meeting.data) return <Failure error={meeting.error ?? new Error("Không tìm thấy cuộc họp.")} retry={meeting.reload} />;
 
-  const editable = can(meeting.data.permission, "edit"); const owner = meeting.data.permission === "owner";
-  const realtimeTarget = meeting.data.language_mode === "auto" ? "auto" : meeting.data.language_mode === "vi" ? "en" : meeting.data.language_mode === "en" ? "vi" : undefined;
+  if (meeting.loading) {
+    return (
+      <div className="meeting-page-container" style={{ padding: 32, display: "flex", justifyContent: "center", alignItems: "center", minHeight: "50vh" }}>
+        <Loading label="Đang tải phiên họp..." />
+      </div>
+    );
+  }
+  if (meeting.error || !meeting.data)
+    return <Failure error={meeting.error ?? new Error("Không tìm thấy cuộc họp.")} retry={meeting.reload} />;
+
+  const editable = can(meeting.data.permission, "edit");
+  const owner = meeting.data.permission === "owner";
+  const realtimeTarget =
+    meeting.data.language_mode === "auto"
+      ? "auto"
+      : meeting.data.language_mode === "vi"
+      ? "en"
+      : meeting.data.language_mode === "en"
+      ? "vi"
+      : undefined;
   const translationPairs = capabilities.data?.translation.language_pairs ?? [];
-  const realtimeTranslationSupported = meeting.data.language_mode === "auto"
-    ? [["vi", "en"], ["en", "vi"]].every(([source, target]) => translationPairs.some(([from, to]) => from === source && to === target))
-    : Boolean(realtimeTarget && translationPairs.some(([source, target]) => source === meeting.data?.language_mode && target === realtimeTarget));
+  const realtimeTranslationSupported =
+    meeting.data.language_mode === "auto"
+      ? [["vi", "en"], ["en", "vi"]].every(([source, target]) =>
+          translationPairs.some(([from, to]) => from === source && to === target)
+        )
+      : Boolean(
+          realtimeTarget &&
+            translationPairs.some(([source, target]) => source === meeting.data?.language_mode && target === realtimeTarget)
+        );
 
-  const displayedSegments = transcript.data?.segments.slice().reverse() ?? [];
+  // Chronological order (earliest to latest) matching screenshot
+  const orderedSegments = transcript.data?.segments
+    ? [...transcript.data.segments].sort((a, b) => a.start_ms - b.start_ms)
+    : [];
+
+  const liveEntries = Object.entries(liveTranscript)
+    .filter(
+      ([, event]) =>
+        event.type !== "transcript.final" ||
+        !transcript.data?.segments.some((segment) => segment.logical_segment_id === event.logical_segment_id)
+    )
+    .sort(([, a], [, b]) => a.start_ms - b.start_ms);
+
+  const hasTranscriptContent = orderedSegments.length > 0 || liveEntries.length > 0;
+
   const selectedMergeSegments = transcript.data?.segments.filter((segment) => mergeIds.includes(segment.logical_segment_id)) ?? [];
-  const selectedMergePositions = new Map(selectedMergeSegments.map((segment, index) => [segment.logical_segment_id, index + 1]));
 
   const initialRecordingDurationMs = Math.max(
     meeting.data.duration_ms ?? 0,
     media.data?.[0]?.duration_ms ?? 0,
-    ...(transcript.data?.segments.map((segment) => segment.end_ms) ?? [0]),
+    ...(transcript.data?.segments.map((segment) => segment.end_ms) ?? [0])
   );
 
+  const translationMap = new Map<string, string>();
+  if (latestTranslation?.segments) {
+    for (const item of latestTranslation.segments) {
+      translationMap.set(item.logical_segment_id, item.text);
+    }
+  }
+  const isRealtimeRecording =
+    editable &&
+    meeting.data.source_type === "realtime" &&
+    meeting.data.status !== "completed" &&
+    Boolean(capabilities.data?.stt.streaming);
 
-  return <>
-    <PageHeading
-      title="Bản ghi"
-      context={meeting.data.title}
-      description={`${languageLabel(meeting.data.language_mode)} · ${meeting.data.source_type === "realtime" ? "Ghi âm" : "Tệp"}`}
-      actions={<>
-        {editable && <Button onClick={() => setRenameOpen(true)}>Đổi tên</Button>}
-        {meeting.data.source_type === "upload" && <a className="btn btn-light" href={`/meetings/${meetingId}/upload`}>Tải tệp</a>}
-        {(owner || editable) && (
-          <Button tone="dark" onClick={() => setShareOpen(true)}>
-            <Icon name="export" /> Chia sẻ qua email
-          </Button>
-        )}
-      </>}
-    />
-    {notice && <div className="notice">{notice}</div>}
-
-    <div className="meeting-layout">
-      <section>
-
-        {/* Realtime Recording Panel */}
-        {editable && meeting.data.source_type === "realtime" && meeting.data.status !== "completed" && capabilities.data?.stt.streaming && (
-          <RecordingPanel
-            meetingId={meetingId}
-            targetLanguage={realtimeTranslationSupported ? realtimeTarget : undefined}
-            translationVisible={showRealtimeTranslations}
-            onTranslationVisibleChange={setShowRealtimeTranslations}
-            onTranslation={(logicalSegmentId, translation) => setRealtimeTranslations((current) => ({ ...current, [logicalSegmentId]: translation }))}
-            onTranscript={(event) => setLiveTranscript((current) => updateLiveTranscript(current, event))}
-            onResetTranscript={() => setLiveTranscript((current) => Object.fromEntries(Object.entries(current).filter(([, event]) => event.type === "transcript.final")))}
-            onFinal={() => { void transcript.reload(); void speakers.reload(); void versions.reload(); }}
-            onComplete={() => { void meeting.reload(); void transcript.reload(); void refreshMedia(); }}
-            onRecordingStateChange={updateRecordingState}
-            hasStartedBefore={transcript.data?.segments !== undefined && transcript.data.segments.length > 0}
-            initialElapsedMs={initialRecordingDurationMs}
-          />
-        )}
-
-        {/* Media Player */}
-        {media.data?.[0] && (
-          <MediaPlayer
-            ref={player}
-            meetingId={meetingId}
-            mediaId={media.data[0].id}
-            filename={media.data[0].original_filename}
-            segments={transcript.data?.segments ?? []}
-            onActiveSegment={setActiveSegmentId}
-          />
-        )}
-
-        <div className="section-title">
-          <h2>Nội dung</h2>
-          {transcript.data && <Status>v{transcript.data.version_no}</Status>}
+  return (
+    <div className="meeting-page-container">
+      {/* Topbar & Breadcrumb */}
+      <div className="meeting-topbar">
+        <div className="topbar-left">
+          <div className="topbar-breadcrumb">
+            <span className="topbar-breadcrumb-root">{playbackMode ? "Phát Lại Ghi Âm" : "Ghi Âm Cuộc Họp"}</span>
+            <span className="topbar-breadcrumb-sep">&gt;</span>
+            <span
+              className="topbar-breadcrumb-title"
+              onClick={() => editable && setRenameOpen(true)}
+              title={editable ? "Nhấp để đổi tên" : undefined}
+            >
+              <span>{meeting.data.title}</span>
+              {editable && <Icon name="edit" />}
+            </span>
+            <span className="topbar-status-badge">
+              {recordingActive ? "● Đang ghi âm" : meeting.data.status === "processing" ? "● Đang xử lý" : "● Sẵn sàng"}
+            </span>
+          </div>
         </div>
 
-        {/* Merge Toolbar */}
-        {mergeIds.length > 0 && (
-          <div className="merge-toolbar">
-            <div className="merge-toolbar-summary">
-              <strong>Đã chọn {mergeIds.length} đoạn</strong>
-              <div className="merge-selection-list">
-                {selectedMergeSegments.map((segment, index) => (
-                  <button type="button" key={segment.logical_segment_id} onClick={() => toggleMerge(segment)} title="Bỏ chọn đoạn này">
-                    <b>{index + 1}</b>
-                    <span>{segment.text}</span>
-                    <Icon name="close" />
+        <div className="topbar-right">
+          <button
+            type="button"
+            className={`topbar-trans-toggle-btn ${showTranslationSplit ? "is-active" : ""}`}
+            onClick={toggleTranslationSplit}
+            title={showTranslationSplit ? "Ẩn cột bản dịch" : "Hiển thị cột bản dịch"}
+          >
+            <span style={{ fontSize: 13, marginRight: 4, fontWeight: 700 }}>文A</span>
+            <span>{showTranslationSplit ? "Ẩn bản dịch" : "Hiển thị bản dịch"}</span>
+          </button>
+          <ThemeToggle />
+        </div>
+      </div>
+
+
+
+      {notice && (
+        <div className="notice" style={{ marginBottom: 16 }}>
+          <span>{notice}</span>
+          <button
+            type="button"
+            onClick={() => setNotice("")}
+            style={{ border: 0, background: "transparent", cursor: "pointer", marginLeft: "auto" }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Top Recording Panel moved to Docked Bottom Bar */}
+
+      {/* Media Player (Hidden audio element + Full Bottom Player when playbackMode is on) */}
+      {media.data?.[0] && (
+        <MediaPlayer
+          ref={player}
+          meetingId={meetingId}
+          mediaId={media.data[0].id}
+          filename={media.data[0].original_filename}
+          segments={transcript.data?.segments ?? []}
+          playbackMode={playbackMode}
+          onClosePlayback={() => {
+            player.current?.pause();
+            setPlaybackMode(false);
+          }}
+          onActiveSegment={setActiveSegmentId}
+          onSummary={() => setSummaryDrawerOpen(true)}
+          onSpeakers={() => setSpeakersDrawerOpen(true)}
+          onShare={() => setShareSocialOpen(true)}
+          onExport={() => setExportModalOpen(true)}
+          downloadUrl={`/api/v1/meetings/${meetingId}/media/${media.data[0].id}/download`}
+        />
+      )}
+
+      {/* FLOATING MERGE ACTION BAR (ALWAYS VISIBLE & STICKY WHEN SEGMENTS ARE SELECTED) */}
+      {mergeIds.length > 0 && (
+        <div className="floating-merge-toolbar">
+          <div className="floating-merge-info">
+            <span className="floating-merge-count-badge">{mergeIds.length}</span>
+            <span className="floating-merge-text">Đã chọn {mergeIds.length} đoạn</span>
+            <div className="floating-merge-chips">
+              {orderedSegments.filter((s) => mergeIds.includes(s.logical_segment_id)).map((segment, index) => (
+                <span
+                  key={segment.logical_segment_id}
+                  className="floating-merge-chip"
+                  title={segment.text}
+                >
+                  <b>#{index + 1}</b> {segment.text.slice(0, 24)}...
+                  <button
+                    type="button"
+                    onClick={() => toggleMerge(segment)}
+                    title="Bỏ chọn"
+                  >
+                    ×
                   </button>
-                ))}
-              </div>
-            </div>
-            <div className="merge-toolbar-actions">
-              <Button onClick={() => setMergeIds([])}>Bỏ chọn tất cả</Button>
-              <Button tone="dark" disabled={mergeIds.length < 2} onClick={prepareMerge}>Gộp các đoạn</Button>
+                </span>
+              ))}
             </div>
           </div>
-        )}
+          <div className="floating-merge-actions">
+            <button
+              type="button"
+              className="btn-merge-action confirm"
+              disabled={mergeIds.length < 2}
+              onClick={prepareMerge}
+              title={mergeIds.length < 2 ? "Hãy chọn thêm ít nhất 1 đoạn liền kề để gộp" : "Gộp các đoạn đã chọn"}
+            >
+              🔗 Gộp {mergeIds.length} đoạn
+            </button>
+            <button
+              type="button"
+              className="btn-merge-action cancel"
+              onClick={() => setMergeIds([])}
+              title="Hủy chọn tất cả"
+            >
+              Bỏ chọn
+            </button>
+          </div>
+        </div>
+      )}
 
-        {transcript.loading && <Loading label="Đang tải transcript…" />}
-        {transcript.error && <TranscriptState error={transcript.error} sourceType={meeting.data.source_type} uploadHref={`/meetings/${meetingId}/upload`} />}
+      {/* Live Incoming Streaming Transcripts rendered inside dual-split-card */}
 
-        {/* Live Incoming Streaming Transcripts */}
-        {Object.entries(liveTranscript)
-          .filter(([, event]) => event.type !== "transcript.final" || !transcript.data?.segments.some((segment) => segment.logical_segment_id === event.logical_segment_id))
-          .sort(([, a], [, b]) => a.start_ms - b.start_ms)
-          .map(([key, event]) => <LiveTranscriptRow key={key} event={event} />)}
 
-        {/* Transcript Segments List */}
-        {displayedSegments.length ? (
-          <div className="transcript-list">
-            {displayedSegments.map((segment) => {
-              const mergePosition = selectedMergePositions.get(segment.logical_segment_id);
-              const mergeSelected = mergePosition !== undefined;
-              const segSpeaker = speakers.data?.find((speaker) => speaker.id === segment.speaker_id);
+
+      {/* DUAL COLUMN SPLIT VIEW (Bản ghi & Bản dịch) */}
+      <div className="meeting-content-flex">
+        <div className="meeting-content-main">
+          <div className={`dual-split-card ${showTranslationSplit ? "is-split" : "is-single"} ${playbackMode ? "is-playback" : ""}`}>
+          {/* Clean header handled by meeting-columns-bar */}
+
+          {translationError && (
+            <div className="form-error" style={{ margin: "8px 16px" }}>
+              {translationError}
+            </div>
+          )}
+
+          {/* Rows: Side-by-side segment pairs OR Modern Empty State */}
+          {!hasTranscriptContent ? (
+            <div className="modern-empty-state">
+              <div className="empty-state-soundwave-icon">
+                {recordingActive ? (
+                  <span className="record-pulsing-dot red" style={{ width: 18, height: 18 }} />
+                ) : (
+                  <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" y1="19" x2="12" y2="22" />
+                  </svg>
+                )}
+              </div>
+              <h3 className="empty-state-title">
+                {recordingActive ? "Đang lắng nghe âm thanh…" : "Sẵn sàng ghi âm cuộc họp"}
+              </h3>
+              <p className="empty-state-desc">
+                {recordingActive
+                  ? "Hãy nói vào microphone, nội dung nhận diện và bản dịch sẽ hiển thị đồng bộ tại đây."
+                  : "Bấm nút Bắt đầu ghi âm ở thanh công cụ bên dưới hoặc tải lên tệp âm thanh sẵn có để tự động chuyển văn bản và dịch song song."}
+              </p>
+            </div>
+          ) : (
+            <div className="dual-rows-wrapper">
+              {orderedSegments.map((segment, segIdx) => {
+              const nextSegment = segIdx < orderedSegments.length - 1 ? orderedSegments[segIdx + 1] : null;
+              const isPlaying = activeSegmentId === segment.logical_segment_id;
+              const isMergeSelected = mergeIds.includes(segment.logical_segment_id);
+              const isEditing = editing?.logical_segment_id === segment.logical_segment_id;
+              const speakerInfo = getSpeakerDisplay(segment.speaker_id, segment.speaker_label, speakers.data);
+
+              const transText =
+                translationMap.get(segment.logical_segment_id) ||
+                realtimeTranslations[segment.logical_segment_id]?.text;
+
+              const isRowMenuOpen = rowMenuOpenId === segment.logical_segment_id;
+
               return (
-                <article
-                  className={`segment ${activeSegmentId === segment.logical_segment_id ? "is-playing" : ""} ${mergeSelected ? "is-merge-selected" : ""}`}
-                  id={`segment-${segment.logical_segment_id}`}
+                <div
                   key={segment.logical_segment_id}
+                  id={`segment-${segment.logical_segment_id}`}
+                  className={`dual-row-pair ${isPlaying ? "is-playing" : ""} ${
+                    isMergeSelected ? "is-merge-selected" : ""
+                  } ${mergeIds.length > 0 ? "is-in-merge-mode" : ""}`}
+                  onClick={(e) => {
+                    if (mergeIds.length > 0) {
+                      const target = e.target as HTMLElement;
+                      if (!target.closest("button, textarea, input, select, .dual-row-menu-dropdown")) {
+                        toggleMerge(segment);
+                      }
+                    }
+                  }}
                 >
-                  <div className="segment-meta">
-                    <div className="segment-speaker-wrapper">
-                      <strong title={segSpeaker?.name ?? "Chưa xác định"}>
-                        {segSpeaker?.name ?? "Chưa xác định"}
-                      </strong>
-                      {segSpeaker?.is_identified && (
-                        <span
-                          className="speaker-identified-badge"
-                          title={
-                            segSpeaker.match_confidence
-                              ? `Nhận diện tự động qua mẫu giọng (${Math.round(segSpeaker.match_confidence * 100)}%)`
-                              : "Đã nhận diện qua mẫu giọng"
-                          }
-                        >
-                          <Icon name="check" /> Đã nhận diện
-                        </span>
-                      )}
-                    </div>
-                    <button className="segment-time" type="button" onClick={() => player.current?.seek(segment.start_ms)}>
-                      {formatTime(segment.start_ms)} – {formatTime(segment.end_ms)}
-                    </button>
+                  {/* Left Cell: Transcript */}
+                  <div className="dual-cell left">
+                    {/* Checkbox for merge selection (hover-visible when 0 selected, always visible in merge mode) */}
+                    {editable && (
+                      <button
+                        type="button"
+                        className={`row-merge-checkbox ${isMergeSelected ? "is-checked" : ""} ${
+                          mergeIds.length > 0 ? "in-merge-mode" : "hover-only"
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleMerge(segment);
+                        }}
+                        title={isMergeSelected ? "Bỏ chọn đoạn này" : "Chọn gộp đoạn này"}
+                      >
+                        {isMergeSelected ? <Icon name="check" /> : null}
+                      </button>
+                    )}
+
+                    {isEditing ? (
+                      <div className="editor" style={{ flex: 1 }}>
+                        <label>
+                          Nội dung
+                          <textarea
+                            value={draft.text}
+                            onChange={(event) => setDraft({ ...draft, text: event.target.value })}
+                          />
+                        </label>
+                        <div className="segment-time-fields">
+                          <label>
+                            Bắt đầu (mm:ss)
+                            <input
+                              inputMode="numeric"
+                              value={draft.startTime}
+                              onChange={(event) => setDraft({ ...draft, startTime: event.target.value })}
+                            />
+                          </label>
+                          <label>
+                            Kết thúc (mm:ss)
+                            <input
+                              inputMode="numeric"
+                              value={draft.endTime}
+                              onChange={(event) => setDraft({ ...draft, endTime: event.target.value })}
+                            />
+                          </label>
+                        </div>
+                        <label>
+                          Người nói
+                          <select
+                            value={draft.speakerId}
+                            onChange={(event) => setDraft({ ...draft, speakerId: event.target.value })}
+                          >
+                            <option value="">Chưa xác định</option>
+                            {speakers.data?.map((spk) => (
+                              <option key={spk.id} value={spk.id}>
+                                {spk.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <div className="form-actions">
+                          <Button onClick={() => setEditing(undefined)}>Hủy</Button>
+                          <Button tone="dark" onClick={() => void save()}>
+                            Lưu
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="dual-cell-main">
+                          <span className="dual-speaker-name">
+                            {speakerInfo.name}:
+                            {isMergeSelected && (
+                              <span className="merge-row-selected-badge">✓ Đã chọn</span>
+                            )}
+                          </span>
+                          <span className="dual-text">{segment.text}</span>
+                          <div className="sentence-hover-actions">
+                            <span className="sentence-hover-time">
+                              {formatTime(segment.start_ms)} - {formatTime(segment.end_ms)}
+                            </span>
+                            <button
+                              type="button"
+                              className="sentence-hover-btn"
+                              onClick={() => {
+                                setPlaybackMode(true);
+                                player.current?.playSegment(segment.start_ms, segment.end_ms);
+                              }}
+                              title={`Phát câu này (${formatTime(segment.start_ms)} - ${formatTime(segment.end_ms)})`}
+                            >
+                              ▷ Phát
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Three-dot menu */}
+                        <div className="dual-cell-actions">
+                          <button
+                            type="button"
+                            className={`dual-more-btn ${isRowMenuOpen ? "active" : ""}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRowMenuOpenId(isRowMenuOpen ? null : segment.logical_segment_id);
+                            }}
+                            title="Tùy chọn đoạn"
+                          >
+                            <Icon name="more" />
+                          </button>
+
+                          {isRowMenuOpen && (
+                            <div className="dual-row-menu-dropdown">
+                              {editable && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRowMenuOpenId(null);
+        setRightRowMenuOpenId(null);
+                                    setEditing(segment);
+                                  }}
+                                >
+                                  <Icon name="edit" />
+                                  <span>Sửa</span>
+                                </button>
+                              )}
+                              {editable && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRowMenuOpenId(null);
+        setRightRowMenuOpenId(null);
+                                    setPendingSplit(segment);
+                                  }}
+                                >
+                                  <span>✂ Tách đoạn</span>
+                                </button>
+                              )}
+                              {editable && nextSegment && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRowMenuOpenId(null);
+                                    setRightRowMenuOpenId(null);
+                                    setPendingMerge([segment, nextSegment]);
+                                  }}
+                                  title={`Gộp ngay với đoạn dưới: "${nextSegment.text.slice(0, 30)}..."`}
+                                >
+                                  <span>🔗 Gộp với đoạn dưới</span>
+                                </button>
+                              )}
+                              {editable && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRowMenuOpenId(null);
+                                    setRightRowMenuOpenId(null);
+                                    toggleMerge(segment);
+                                  }}
+                                >
+                                  <span>{isMergeSelected ? "✕ Bỏ chọn gộp" : "☑ Chọn gộp nhiều đoạn"}</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRowMenuOpenId(null);
+        setRightRowMenuOpenId(null);
+                                  void copyToClipboard(segment.text);
+                                  setNotice("Đã sao chép nội dung.");
+                                }}
+                              >
+                                <Icon name="copy" />
+                                <span>Sao chép</span>
+                              </button>
+                              {editable && (
+                                <button
+                                  type="button"
+                                  className="text-danger"
+                                  onClick={() => {
+                                    setRowMenuOpenId(null);
+        setRightRowMenuOpenId(null);
+                                    setPendingDelete(segment);
+                                  }}
+                                >
+                                  <Icon name="trash" />
+                                  <span>Xóa</span>
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </div>
 
-                  {editing?.logical_segment_id === segment.logical_segment_id ? (
-                    <div className="editor">
-                      <label>
-                        Nội dung
-                        <textarea value={draft.text} onChange={(event) => setDraft({ ...draft, text: event.target.value })} />
-                      </label>
-                      <div className="segment-time-fields">
-                        <label>
-                          Bắt đầu (mm:ss)
-                          <input inputMode="numeric" placeholder="01:15" value={draft.startTime} onChange={(event) => setDraft({ ...draft, startTime: event.target.value })} />
-                        </label>
-                        <label>
-                          Kết thúc (mm:ss)
-                          <input inputMode="numeric" placeholder="02:30" value={draft.endTime} onChange={(event) => setDraft({ ...draft, endTime: event.target.value })} />
-                        </label>
-                      </div>
-                      <label>
-                        Người nói
-                        <select value={draft.speakerId} onChange={(event) => setDraft({ ...draft, speakerId: event.target.value })}>
-                          <option value="">Chưa xác định</option>
-                          {speakers.data?.map((speaker) => <option key={speaker.id} value={speaker.id}>{speaker.name}</option>)}
-                        </select>
-                      </label>
-                      <div className="form-actions">
-                        <Button onClick={() => setEditing(undefined)}>Hủy</Button>
-                        <Button tone="dark" onClick={() => void save()}>Lưu</Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="segment-content">
-                      {mergeSelected && <span className="merge-selected-badge"><Icon name="check" />Đoạn gộp số {mergePosition}</span>}
-                      <p>{segment.text}</p>
-                      {showRealtimeTranslations && realtimeTranslations[segment.logical_segment_id] && (
-                        <div className="realtime-translation">
-                          <small>BẢN DỊCH · {realtimeTranslations[segment.logical_segment_id].targetLanguage.toUpperCase()}</small>
-                          <p>{realtimeTranslations[segment.logical_segment_id].text}</p>
+                  {/* Right Cell: Translation (if showTranslationSplit) */}
+                  {showTranslationSplit && (
+                    <div className="dual-cell right">
+                      <div className="dual-cell-main">
+                        <span className="dual-speaker-name">{speakerInfo.name}:</span>
+                        <span className="dual-text">
+                          {transText || (
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                              <em style={{ color: "var(--muted)", fontSize: 13 }}>Chưa có bản dịch</em>
+                              {editable && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  style={{ padding: "2px 8px", fontSize: 11, height: 24, borderRadius: 4 }}
+                                  onClick={() => void triggerTranslation()}
+                                  disabled={isTranslating}
+                                >
+                                  {isTranslating ? "Đang dịch…" : "Dịch"}
+                                </button>
+                              )}
+                            </span>
+                          )}
+                        </span>
+                        <div className="sentence-hover-actions">
+                          <span className="sentence-hover-time">
+                            {formatTime(segment.start_ms)} - {formatTime(segment.end_ms)}
+                          </span>
+                          <button
+                            type="button"
+                            className="sentence-hover-btn"
+                            onClick={() => {
+                              setPlaybackMode(true);
+                              player.current?.playSegment(segment.start_ms, segment.end_ms);
+                            }}
+                            title={`Phát câu này (${formatTime(segment.start_ms)} - ${formatTime(segment.end_ms)})`}
+                          >
+                            ▷ Phát
+                          </button>
                         </div>
-                      )}
-                      {editable && (
-                        <div className="inline-actions">
-                          <Button onClick={() => setEditing(segment)}>Sửa</Button>
-                          <Button onClick={() => setPendingSplit(segment)}>Tách</Button>
-                          <Button className={mergeSelected ? "is-selected" : ""} onClick={() => toggleMerge(segment)}>
-                            {mergeSelected ? `Bỏ chọn #${mergePosition}` : "Chọn gộp"}
-                          </Button>
-                          <Button tone="danger" onClick={() => setPendingDelete(segment)}>Xóa</Button>
-                        </div>
-                      )}
+                      </div>
+
+                      <div className="dual-cell-actions">
+                        <button
+                          type="button"
+                          className={`dual-more-btn ${rightRowMenuOpenId === segment.logical_segment_id ? "active" : ""}`}
+                          title="Tùy chọn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRightRowMenuOpenId(
+                              rightRowMenuOpenId === segment.logical_segment_id ? null : segment.logical_segment_id
+                            );
+                          }}
+                        >
+                          <Icon name="more" />
+                        </button>
+
+                        {rightRowMenuOpenId === segment.logical_segment_id && (
+                          <div className="dual-row-menu-dropdown">
+                            {editable && nextSegment && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRowMenuOpenId(null);
+                                  setRightRowMenuOpenId(null);
+                                  setPendingMerge([segment, nextSegment]);
+                                }}
+                                title={`Gộp ngay với đoạn dưới: "${nextSegment.text.slice(0, 30)}..."`}
+                              >
+                                <span>🔗 Gộp với đoạn dưới</span>
+                              </button>
+                            )}
+                            {editable && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRowMenuOpenId(null);
+                                  setRightRowMenuOpenId(null);
+                                  toggleMerge(segment);
+                                }}
+                              >
+                                <span>{isMergeSelected ? "✕ Bỏ chọn gộp" : "☑ Chọn gộp nhiều đoạn"}</span>
+                              </button>
+                            )}
+                            {transText && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRightRowMenuOpenId(null);
+                                  void copyToClipboard(transText);
+                                  setNotice("Đã sao chép bản dịch.");
+                                }}
+                              >
+                                <Icon name="copy" />
+                                <span>Sao chép bản dịch</span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRightRowMenuOpenId(null);
+                                player.current?.seek(segment.start_ms);
+                              }}
+                            >
+                              <Icon name="play" />
+                              <span>Phát đoạn này</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
-                </article>
+                </div>
               );
             })}
-          </div>
-        ) : null}
-      </section>
 
-      {/* Side Details Panel */}
-      <MeetingSidePanel
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        meeting={meeting.data}
-        segmentCount={transcript.data?.segments.length ?? 0}
-        speakerCount={speakers.data?.length ?? 0}
-        meetingId={meetingId}
-        canComment={can(meeting.data.permission, "comment")}
-        owner={owner}
-        currentUserId={user?.id}
-        comments={comments}
-        versions={versions}
-      />
+            {/* Realtime Streaming Live Entries inside the card */}
+            {liveEntries.map(([key, event]) => (
+              <div key={key} className="dual-row-pair is-live-streaming">
+                <div className="dual-cell left">
+                  <div className="dual-cell-main">
+                    <span className="dual-speaker-name">
+                      {event.speaker_name ?? (event.speaker_label ? `Người nói ${event.speaker_label}` : "Người nói")}:
+                    </span>
+                    <span className="dual-text">{event.text}</span>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 5,
+                        fontSize: 11,
+                        color: "#ef4444",
+                        fontWeight: 600,
+                        marginLeft: 10,
+                      }}
+                    >
+                      <span className="record-pulsing-dot red" style={{ width: 6, height: 6 }} />
+                      Đang nhận diện…
+                    </span>
+                  </div>
+                </div>
+                {showTranslationSplit && (
+                  <div className="dual-cell right">
+                    <div className="dual-cell-main">
+                      <span className="dual-speaker-name">Bản dịch:</span>
+                      <span className="dual-text">
+                        <em style={{ color: "var(--muted)", fontSize: 13 }}>Đang chờ hoàn tất câu để dịch…</em>
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+            <div
+              ref={transcriptBottomRef}
+              style={{ height: 0, minHeight: 0, pointerEvents: "none", scrollMarginBottom: 120 }}
+            />
+            </div>
+          )}
+        </div>
+      </div>
+
+
     </div>
 
-    {renameOpen && <RenameMeetingDialog title={meeting.data.title} close={() => setRenameOpen(false)} confirm={async (title) => { const updated = await meetingsApi.update(meetingId, { title }); meeting.setData(updated); setRenameOpen(false); setNotice("Đã đổi tên bản ghi."); }} />}
-    {shareOpen && <ShareDialog meetingId={meetingId} title={meeting.data.title} close={() => setShareOpen(false)} />}
-    {pendingSplit && <SplitDialog segment={pendingSplit} close={() => setPendingSplit(undefined)} confirm={(splitAt, first, second) => void handleSplit(pendingSplit, splitAt, first, second)} />}
-    {pendingMerge && <ConfirmDialog title={`Gộp ${pendingMerge.length} đoạn?`} detail="Các đoạn đã chọn sẽ được nối theo đúng thứ tự thời gian thành một đoạn." confirmLabel="Gộp đoạn" close={() => setPendingMerge(undefined)} confirm={() => void handleMerge(pendingMerge)} />}
-    {pendingDelete && <ConfirmDialog title="Xóa đoạn transcript?" detail="Đoạn đã xóa sẽ không còn trong phiên bản transcript hiện hành." confirmLabel="Xóa đoạn" close={() => setPendingDelete(undefined)} confirm={() => { const segment = pendingDelete; setPendingDelete(undefined); void mutate(() => meetingsApi.deleteSegment(segment.logical_segment_id), "Đã xóa đoạn và tạo phiên bản mới.", segment.logical_segment_id); }} />}
-  </>;
+      {/* Slide-over Drawer: TÓM TẮT AI */}
+      {summaryDrawerOpen && (
+        <SummaryAiModal
+          meetingId={meetingId}
+          meetingTitle={meeting.data.title}
+          hasTranscript={orderedSegments.length > 0}
+          editable={editable}
+          summaries={summaries}
+          capabilities={capabilities.data}
+          close={() => setSummaryDrawerOpen(false)}
+        />
+      )}
+
+      {/* Wide Modal: QUẢN LÝ NGƯỜI NÓI (ẢNH 5) */}
+      {speakersDrawerOpen && (
+        <SpeakerManagementModal
+          meetingId={meetingId}
+          speakers={speakers}
+          editable={editable}
+          close={() => setSpeakersDrawerOpen(false)}
+        />
+      )}
+
+      {/* Centered Modal: XUẤT NỘI DUNG (ẢNH 4) */}
+      {exportModalOpen && (
+        <ExportContentModal
+          meetingId={meetingId}
+          meetingTitle={meeting.data.title}
+          mediaId={media.data?.[0]?.id}
+          close={() => setExportModalOpen(false)}
+        />
+      )}
+
+      {/* Centered Modal: CHIA SẺ (ẢNH 1) */}
+      {shareSocialOpen && (
+        <ShareSocialModal
+          meetingTitle={meeting.data.title}
+          close={() => setShareSocialOpen(false)}
+        />
+      )}
+
+      {/* Dialogs */}
+      {renameOpen && (
+        <RenameMeetingDialog
+          title={meeting.data.title}
+          close={() => setRenameOpen(false)}
+          confirm={async (title) => {
+            const updated = await meetingsApi.update(meetingId, { title });
+            meeting.setData(updated);
+            bundle.setData((prev) => (prev ? { ...prev, meeting: updated } : prev));
+            setRenameOpen(false);
+            setNotice("Đã đổi tên bản ghi.");
+            window.dispatchEvent(new CustomEvent("bocbang:refresh-meetings", { detail: updated }));
+          }}
+        />
+      )}
+
+      {pendingSplit && (
+        <SplitDialog
+          segment={pendingSplit}
+          close={() => setPendingSplit(undefined)}
+          confirm={(splitAt, first, second) => void handleSplit(pendingSplit, splitAt, first, second)}
+        />
+      )}
+
+      {pendingMerge && (
+        <ConfirmDialog
+          title={`Gộp ${pendingMerge.length} đoạn?`}
+          detail="Các đoạn đã chọn sẽ được nối theo đúng thứ tự thời gian thành một đoạn."
+          confirmLabel="Gộp đoạn"
+          close={() => setPendingMerge(undefined)}
+          confirm={() => void handleMerge(pendingMerge)}
+        />
+      )}
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Xóa đoạn transcript?"
+          detail="Đoạn đã xóa sẽ không còn trong phiên bản transcript hiện hành."
+          confirmLabel="Xóa đoạn"
+          close={() => setPendingDelete(undefined)}
+          confirm={() => {
+            const segment = pendingDelete;
+            setPendingDelete(undefined);
+            void mutate(
+              () => meetingsApi.deleteSegment(segment.logical_segment_id),
+              "Đã xóa đoạn và tạo phiên bản mới.",
+              segment.logical_segment_id
+            );
+          }}
+        />
+      )}
+
+      {/* DOCKED BOTTOM BAR: RECORDING (KHI ĐANG / CHUẨN BỊ GHI ÂM) HOẶC PLAYBACK (ẢNH 2 & 4) */}
+      {(!playbackMode || !media.data?.[0]) && (
+        isRealtimeRecording ? (
+          <RecordingPanel
+            meetingId={meetingId}
+            targetLanguage={targetLang || (realtimeTranslationSupported ? realtimeTarget : "en")}
+            translationVisible={showRealtimeTranslations}
+            onTranslationVisibleChange={setShowRealtimeTranslations}
+            onTranslation={(logicalSegmentId, translation) =>
+              setRealtimeTranslations((current) => ({ ...current, [logicalSegmentId]: translation }))
+            }
+            onTranscript={(event) => setLiveTranscript((current) => updateLiveTranscript(current, event))}
+            onResetTranscript={() =>
+              setLiveTranscript((current) =>
+                Object.fromEntries(Object.entries(current).filter(([, event]) => event.type === "transcript.final"))
+              )
+            }
+            onFinal={() => {
+              void transcript.reload();
+              void speakers.reload();
+              void versions.reload();
+            }}
+            onComplete={() => {
+              void meeting.reload();
+              void transcript.reload();
+              void refreshMedia();
+            }}
+            onRecordingStateChange={updateRecordingState}
+            hasStartedBefore={transcript.data?.segments !== undefined && transcript.data.segments.length > 0}
+            hasAudio={Boolean(media.data?.[0])}
+            initialElapsedMs={initialRecordingDurationMs}
+            targetLang={targetLang}
+            onTargetLangChange={setTargetLang}
+            onPlayback={() => {
+              if (media.data?.[0]) {
+                setPlaybackMode(true);
+                player.current?.play();
+              } else {
+                setNotice("Chưa có bản ghi âm để phát lại.");
+              }
+            }}
+            playbackMode={playbackMode}
+            onShare={() => setShareSocialOpen(true)}
+            onSummary={() => setSummaryDrawerOpen(true)}
+            onExport={() => setExportModalOpen(true)}
+            onSpeakers={() => setSpeakersDrawerOpen(true)}
+          />
+        ) : (
+        <div className="docked-bottom-bar-wrap">
+        <div className="docked-bottom-bar">
+          {/* Blue Playback pill button (ON THE LEFT - ONLY WHEN THERE IS RECORDING) */}
+          {Boolean(media.data?.[0] || hasTranscriptContent) && (
+            <button
+              type="button"
+              className="docked-play-pill"
+              onClick={() => {
+                if (media.data?.[0]) {
+                  setPlaybackMode(true);
+                  player.current?.play();
+                } else {
+                  setNotice("Chưa có bản ghi âm để phát lại.");
+                }
+              }}
+              title="Phát lại bản ghi"
+            >
+              <Icon name="play" />
+              <span>Phát lại bản ghi</span>
+              <span className="docked-tooltip">Phát lại bản ghi</span>
+            </button>
+          )}
+
+          <select
+            className="docked-lang-pill"
+            value={targetLang.toUpperCase()}
+            onChange={(e) => setTargetLang(e.target.value.toLowerCase())}
+            title="Ngôn ngữ đích"
+            style={{
+              width: 58,
+              minWidth: 58,
+              maxWidth: 58,
+              height: 36,
+              padding: "0 6px",
+              borderRadius: 8,
+              background: "#2a2b32",
+              color: "#fff",
+              border: "1px solid rgba(255,255,255,0.15)",
+              fontWeight: 700,
+              fontSize: 13,
+              flexShrink: 0,
+              textAlign: "center",
+            }}
+          >
+            <option value="VI">VI</option>
+            <option value="EN">EN</option>
+          </select>
+
+          {/* Share icon (Ảnh 1: Modal Chia sẻ) */}
+          <button
+            type="button"
+            className="docked-icon-btn"
+            onClick={() => setShareSocialOpen(true)}
+            title="Chia sẻ cuộc họp"
+          >
+            <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8m-4-6-4-4-4 4m4-4v13" />
+            </svg>
+            <span className="docked-tooltip">Chia sẻ cuộc họp</span>
+          </button>
+
+          {/* AI Summary icon */}
+          <button
+            type="button"
+            className="docked-icon-btn"
+            onClick={() => setSummaryDrawerOpen(true)}
+            title="Tóm tắt AI"
+          >
+            <Icon name="sparkles" />
+            <span className="docked-tooltip">Tóm tắt AI</span>
+          </button>
+
+          {/* Export icon (Ảnh 4: Modal Xuất nội dung) */}
+          <button
+            type="button"
+            className="docked-icon-btn"
+            onClick={() => setExportModalOpen(true)}
+            title="Xuất nội dung"
+          >
+            <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+              <polyline points="10 9 9 9 8 9" />
+            </svg>
+            <span className="docked-tooltip">Xuất nội dung</span>
+          </button>
+
+          {/* Download audio icon */}
+          {media.data?.[0] && (
+            <a
+              className="docked-icon-btn"
+              href={`/api/v1/meetings/${meetingId}/media/${media.data[0].id}/download`}
+              download={media.data[0].original_filename}
+              title="Tải audio về máy"
+            >
+              <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4m4-5 5 5 5-5m-5 5V3" />
+              </svg>
+              <span className="docked-tooltip">Tải audio về máy</span>
+            </a>
+          )}
+
+          {/* Speaker icon (Ảnh 5: Modal Quản lý người nói) */}
+          <button
+            type="button"
+            className="docked-icon-btn"
+            onClick={() => setSpeakersDrawerOpen(true)}
+            title="Quản lý người nói"
+          >
+            <Icon name="speaker" />
+            <span className="docked-tooltip">Quản lý người nói</span>
+          </button>
+        </div>
+      </div>
+        )
+      )}
+
+      {/* FIXED VIEW LOG AI ON BOTTOM RIGHT (ẢNH 2 & ẢNH 4) */}
+      {!playbackMode && (
+      <button
+        type="button"
+        className="docked-view-log-btn-fixed"
+        onClick={() => setLogAiOpen(true)}
+        title="Xem nhật ký AI"
+      >
+        <span>⚡ View Log AI</span>
+        <span className="docked-tooltip">Xem nhật ký AI</span>
+      </button>
+      )}
+
+      {logAiOpen && (
+        <LogAiModal
+          meetingTitle={meeting.data.title}
+          close={() => setLogAiOpen(false)}
+        />
+      )}
+    </div>
+  );
 }
 
-function LiveTranscriptRow({ event }: { event: LiveTranscriptEntry }) {
-  useEffect(() => recordRender(event), [event]);
-  const isUnconfirmed = event.recognition_status === "unconfirmed";
+/* ═══════════════════════════════════════════
+   SLIDE-OVER DRAWER: TÓM TẮT AI
+═══════════════════════════════════════════ */
+const summaryLabels: Record<SummaryTemplate, string> = {
+  general: "Tóm tắt chung",
+  briefing: "Họp giao ban",
+  voting: "Họp biểu quyết",
+};
+const summaryLangLabels: Record<SummaryLanguage, string> = { vi: "Tiếng Việt", en: "English" };
+
+
+function humanizeKey(key: string) {
+  return key.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function toSummaryText(content: Record<string, unknown>): string {
+  return Object.entries(content)
+    .map(([key, value]) => {
+      const heading = humanizeKey(key);
+      const text = typeof value === "object" && value !== null ? JSON.stringify(value, null, 2) : String(value);
+      return `${heading}:\n${text}`;
+    })
+    .join("\n\n");
+}
+
+function SummaryValueRenderer({ value }: { value: unknown }) {
+  if (value === null || value === undefined) return <span style={{ color: "var(--muted)" }}>—</span>;
+  if (Array.isArray(value)) {
+    return (
+      <ul style={{ margin: "4px 0", paddingLeft: 20 }}>
+        {value.map((item, index) => (
+          <li key={index} style={{ marginBottom: 4 }}>
+            <SummaryValueRenderer value={item} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  if (typeof value === "object") {
+    return (
+      <div style={{ paddingLeft: 12, borderLeft: "2px solid rgba(255,255,255,0.1)" }}>
+        {Object.entries(value as Record<string, unknown>).map(([k, v]) => (
+          <div key={k} style={{ marginBottom: 6 }}>
+            <strong style={{ color: "#94a3b8", fontSize: 12.5 }}>{humanizeKey(k)}: </strong>
+            <SummaryValueRenderer value={v} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return <span>{String(value)}</span>;
+}
+
+function SummaryAiModal({
+  meetingId,
+  meetingTitle,
+  hasTranscript,
+  editable,
+  summaries,
+  capabilities,
+  close,
+}: {
+  meetingId: string;
+  meetingTitle: string;
+  hasTranscript: boolean;
+  editable: boolean;
+  summaries: any;
+  capabilities: any;
+  close: () => void;
+}) {
+  const jobs = useJobMonitor();
+  const [template, setTemplate] = useState<SummaryTemplate>("general");
+  const [outputLang, setOutputLang] = useState<SummaryLanguage>("vi");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    if (jobs.job?.status === "completed") {
+      void summaries.reload();
+    }
+  }, [jobs.job?.status, summaries.reload]);
+
+  const summary = summaries.data?.find(
+    (item: any) => item.template === template && item.output_language === outputLang
+  );
+
+  async function generate() {
+    try {
+      setError("");
+      setNotice("");
+      jobs.track(await meetingsApi.summary(meetingId, template, outputLang));
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
+  }
+
+  async function copy() {
+    if (!summary?.current_version?.content) return;
+    try {
+      await copyToClipboard(toSummaryText(summary.current_version.content));
+      setNotice("Đã sao chép tóm tắt vào bộ nhớ tạm.");
+    } catch {
+      setError("Không thể sao chép nội dung.");
+    }
+  }
+
+  const jobActive = ["queued", "processing", "retrying"].includes(jobs.job?.status ?? "");
+
   return (
-    <article className={`live-transcript-row ${isUnconfirmed ? "unconfirmed" : ""}`}>
-      <div className="live-transcript-meta">
-        <strong>{event.speaker_name ?? (event.speaker_label ? `Người nói ${event.speaker_label}` : "Chưa xác định")}</strong>
-        <small>{formatTime(event.start_ms)} – {formatTime(event.end_ms)}</small>
-        <span className="live-transcript-badge">
-          {event.type === "transcript.final" ? "Đã xác nhận" : isUnconfirmed ? "Chưa lưu" : "Đang nhận diện…"}
-        </span>
+    <div className="dialog-backdrop" onClick={close}>
+      <div className="summary-modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="summary-modal-header">
+          <div className="summary-modal-title-group">
+            <div className="summary-modal-icon-badge">
+              <Icon name="sparkles" />
+            </div>
+            <div>
+              <h3 className="summary-modal-title">Tóm tắt AI Cuộc họp</h3>
+              <p className="summary-modal-subtitle">{meetingTitle}</p>
+            </div>
+          </div>
+          <button type="button" className="summary-modal-close" onClick={close} aria-label="Đóng">
+            ✕
+          </button>
+        </div>
+
+        <div className="summary-modal-body">
+          {/* Controls: Template selection & Language selection */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+            <div className="summary-template-pills">
+              {Object.entries(summaryLabels).map(([k, v]) => (
+                <button
+                  type="button"
+                  key={k}
+                  className={`summary-pill-btn ${template === k ? "is-active" : ""}`}
+                  onClick={() => setTemplate(k as SummaryTemplate)}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <span style={{ fontSize: 13, color: "var(--muted)", marginRight: 4 }}>Ngôn ngữ:</span>
+              <button
+                type="button"
+                className={`summary-pill-btn ${outputLang === "vi" ? "is-active" : ""}`}
+                onClick={() => setOutputLang("vi")}
+                style={{ padding: "4px 10px", fontSize: 12 }}
+              >
+                Tiếng Việt
+              </button>
+              <button
+                type="button"
+                className={`summary-pill-btn ${outputLang === "en" ? "is-active" : ""}`}
+                onClick={() => setOutputLang("en")}
+                style={{ padding: "4px 10px", fontSize: 12 }}
+              >
+                English
+              </button>
+            </div>
+          </div>
+
+          {/* Action Row */}
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            {editable && (
+              <button
+                type="button"
+                className="export-btn-primary"
+                disabled={!hasTranscript || jobActive}
+                onClick={() => void generate()}
+                style={{ flex: 1, height: 40 }}
+              >
+                {jobActive ? "Đang tạo tóm tắt…" : summary ? "Tạo lại tóm tắt" : "Tạo tóm tắt AI"}
+              </button>
+            )}
+            {summary && (
+              <>
+                <button
+                  type="button"
+                  className="export-btn-secondary"
+                  onClick={() => void copy()}
+                  style={{ width: "auto", padding: "0 18px", height: 40, gap: 6 }}
+                >
+                  <Icon name="copy" /> Sao chép
+                </button>
+                <button
+                  type="button"
+                  className="export-btn-secondary"
+                  onClick={() => {
+                    if (!summary?.current_version?.content) return;
+                    const txt = toSummaryText(summary.current_version.content);
+                    const blob = new Blob([txt], { type: "text/plain;charset=utf-8" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `${meetingTitle}_tom_tat.txt`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  style={{ width: "auto", padding: "0 16px", height: 40, gap: 6 }}
+                  title="Tải về tệp .txt"
+                >
+                  <Icon name="download" /> Xuất TXT
+                </button>
+              </>
+            )}
+          </div>
+
+          {error && <div className="form-error">{error}</div>}
+          {notice && <div className="notice">{notice}</div>}
+          {jobs.job && (
+            <div className={`job-state ${jobs.job.status}`}>
+              Tóm tắt AI: {statusLabel(jobs.job.status)}
+              {jobs.job.progress !== undefined ? ` · ${jobs.job.progress}%` : ""}
+            </div>
+          )}
+
+          {/* Content */}
+          {summaries.loading ? (
+            <Loading label="Đang tải bản tóm tắt…" />
+          ) : summary?.current_version?.content ? (
+            <div className="summary-content-box">
+              <div style={{ marginBottom: 14, display: "flex", gap: 8, alignItems: "center" }}>
+                <Status>{summaryLabels[summary.template as SummaryTemplate]}</Status>
+                <small style={{ color: "#94a3b8" }}>
+                  {new Date(summary.current_version.created_at).toLocaleString("vi-VN")}
+                </small>
+              </div>
+
+              {Object.entries(summary.current_version.content).map(([key, value]) => (
+                <div key={key} style={{ marginBottom: 16 }}>
+                  <h4 className="summary-section-heading">
+                    {humanizeKey(key)}
+                  </h4>
+                  <SummaryValueRenderer value={value} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: "var(--muted)", background: "rgba(255,255,255,0.02)", borderRadius: 10, border: "1px dashed rgba(255,255,255,0.1)" }}>
+              <p style={{ margin: 0, fontSize: 13.5 }}>
+                Chưa có bản tóm tắt cho mẫu này. Nhấn <strong>"Tạo tóm tắt AI"</strong> để phân tích tự động.
+              </p>
+            </div>
+          )}
+        </div>
       </div>
-      <div className="live-transcript-content">
-        <p>{event.text}</p>
-      </div>
-    </article>
+    </div>
   );
 }
 
 
-function TranscriptState({ error, sourceType, uploadHref }: { error: Error; sourceType: "realtime" | "upload"; uploadHref: string }) {
-  const api = error as ApiError;
-  const missing = api.status === 404;
-  return <Empty title={missing ? "Chưa có transcript" : "Transcript chưa tải được"} detail={missing ? sourceType === "upload" ? "Tải tệp âm thanh để tạo transcript từ backend." : "Bắt đầu ghi âm để tạo transcript trực tiếp." : error.message} action={missing && sourceType === "upload" ? <a className="btn btn-dark" href={uploadHref}>Tải tệp âm thanh</a> : undefined} />;
-}
+const MediaPlayer = forwardRef<
+  AudioPlayerHandle,
+  {
+    meetingId: string;
+    mediaId: string;
+    filename: string;
+    segments: Segment[];
+    playbackMode: boolean;
+    onClosePlayback?: () => void;
+    onActiveSegment: (id?: string) => void;
+    onSummary?: () => void;
+    onSpeakers?: () => void;
+    onShare?: () => void;
+    onExport?: () => void;
+    downloadUrl?: string;
+  }
+>(function MediaPlayer(
+  {
+    meetingId,
+    mediaId,
+    filename,
+    segments,
+    playbackMode,
+    onClosePlayback,
+    onActiveSegment,
+    onSummary,
+    onSpeakers,
+    onShare,
+    onExport,
+    downloadUrl,
+  },
+  ref
+) {
+  const audio = useRef<HTMLAudioElement>(null);
+  const [source, setSource] = useState("");
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [shuffle, setShuffle] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const stopAtMsRef = useRef<number | null>(null);
 
-function MeetingSidePanel({ activeTab, setActiveTab, meeting, segmentCount, speakerCount, meetingId, canComment, owner, currentUserId, comments, versions }: { activeTab: MeetingTab; setActiveTab: (tab: MeetingTab) => void; meeting: { status: string; language_mode: string; duration_ms?: number }; segmentCount: number; speakerCount: number; meetingId: string; canComment: boolean; owner: boolean; currentUserId?: string; comments: { data?: Comment[]; setData: React.Dispatch<React.SetStateAction<Comment[] | undefined>>; loading: boolean; error?: Error; reload: () => Promise<void> }; versions: { data?: Array<{ id: string; version_no: number; source: string; created_at: string }>; loading: boolean; error?: Error } }) {
-  const tabs: Array<[MeetingTab, string]> = [["info", "Thông tin"], ["comments", "Bình luận"], ["versions", "Phiên bản"]];
-  return <aside className="meeting-side"><div className="meeting-tabs" role="tablist" aria-label="Chi tiết cuộc họp">{tabs.map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={activeTab === id} className={activeTab === id ? "active" : ""} onClick={() => setActiveTab(id)}>{label}</button>)}</div><div className="meeting-tab-content" role="tabpanel">{activeTab === "info" && <MeetingContext meeting={meeting} segmentCount={segmentCount} speakerCount={speakerCount} />}{activeTab === "comments" && <CommentsPanel meetingId={meetingId} canComment={canComment} owner={owner} currentUserId={currentUserId} comments={comments} />}{activeTab === "versions" && <section className="panel"><h2>Phiên bản</h2><VersionList versions={versions} /></section>}</div></aside>;
-}
+  const speeds = [0.75, 1, 1.25, 1.5, 2];
+  function cyclePlaybackSpeed() {
+    const nextIdx = (speeds.indexOf(playbackSpeed) + 1) % speeds.length;
+    const nextSpeed = speeds[nextIdx];
+    setPlaybackSpeed(nextSpeed);
+    if (audio.current) audio.current.playbackRate = nextSpeed;
+  }
 
-const MediaPlayer = forwardRef<AudioPlayerHandle, { meetingId: string; mediaId: string; filename: string; segments: Segment[]; onActiveSegment: (id?: string) => void }>(function MediaPlayer({ meetingId, mediaId, filename, segments, onActiveSegment }, ref) {
-  const audio = useRef<HTMLAudioElement>(null); const speedControl = useRef<HTMLDivElement>(null); const [source, setSource] = useState(""); const [error, setError] = useState(""); const [speed, setSpeed] = useState(1); const [speedOpen, setSpeedOpen] = useState(false);
-  useImperativeHandle(ref, () => ({ seek(milliseconds) { const element = audio.current; if (!element) return; element.currentTime = milliseconds / 1000; void element.play(); } }), []);
+  useImperativeHandle(
+    ref,
+    () => ({
+      playSegment(startMs: number, endMs: number) {
+        stopAtMsRef.current = endMs;
+        const element = audio.current;
+        if (!element) return;
+        element.currentTime = startMs / 1000;
+        void element.play();
+        setIsPlaying(true);
+      },
+      seek(milliseconds) {
+        stopAtMsRef.current = null;
+        const element = audio.current;
+        if (!element) return;
+        element.currentTime = milliseconds / 1000;
+        void element.play();
+        setIsPlaying(true);
+      },
+      play() {
+        stopAtMsRef.current = null;
+        void audio.current?.play();
+        setIsPlaying(true);
+      },
+      pause() {
+        stopAtMsRef.current = null;
+        audio.current?.pause();
+        setIsPlaying(false);
+      },
+      toggle() {
+        stopAtMsRef.current = null;
+        if (!audio.current) return;
+        if (audio.current.paused) {
+          void audio.current.play();
+          setIsPlaying(true);
+        } else {
+          audio.current.pause();
+          setIsPlaying(false);
+        }
+      },
+      toggleMute() {
+        if (!audio.current) return false;
+        audio.current.muted = !audio.current.muted;
+        setIsMuted(audio.current.muted);
+        return audio.current.muted;
+      },
+    }),
+    []
+  );
+
   useEffect(() => {
     let active = true;
     let objectUrl = "";
     setSource("");
-    setError("");
     void meetingsApi
       .streamMedia(meetingId, mediaId)
       .then((blob) => {
-        if (!blob.size) throw new Error("Băng ghi âm đang trống.");
+        if (!blob.size) return;
         objectUrl = URL.createObjectURL(blob);
         if (active) setSource(objectUrl);
         else URL.revokeObjectURL(objectUrl);
       })
-      .catch((cause: Error) => {
-        if (!active) return;
-        const msg = cause.message || "";
-        if (
-          msg.includes("Media is no longer available") ||
-          msg.includes("MEDIA_UNAVAILABLE") ||
-          msg.includes("không còn trên máy chủ")
-        ) {
-          setError(
-            "Tệp âm thanh này được tạo từ phiên bản trước đó nên không còn trên máy chủ. Toàn bộ nội dung văn bản bên dưới vẫn được lưu an toàn."
-          );
-        } else {
-          setError(msg || "Không thể tải tệp âm thanh. Vui lòng thử lại sau.");
-        }
-      });
+      .catch(() => {});
     return () => {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [meetingId, mediaId]);
-  useEffect(() => {
-    if (!speedOpen) return;
-    function closeOutside(event: PointerEvent) { if (!speedControl.current?.contains(event.target as Node)) setSpeedOpen(false); }
-    function closeOnEscape(event: KeyboardEvent) { if (event.key === "Escape") setSpeedOpen(false); }
-    document.addEventListener("pointerdown", closeOutside);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => { document.removeEventListener("pointerdown", closeOutside); document.removeEventListener("keydown", closeOnEscape); };
-  }, [speedOpen]);
-  function syncTranscript() { const milliseconds = (audio.current?.currentTime ?? 0) * 1000; const segment = segments.find((item) => item.start_ms <= milliseconds && milliseconds < item.end_ms); onActiveSegment(segment?.logical_segment_id); }
-  function changeSpeed(next: number) { setSpeed(next); setSpeedOpen(false); if (audio.current) audio.current.playbackRate = next; }
-  const speeds = [0.75, 1, 1.25, 1.5, 2];
-  return <section className="player"><div className="player-heading"><strong>Nghe lại băng · {filename}</strong>{source && <div className="player-tools"><div className="player-speed-control" ref={speedControl}><button type="button" className="player-speed-trigger" aria-label={`Tốc độ phát ${speed} lần`} aria-expanded={speedOpen} aria-haspopup="menu" title="Tốc độ phát" onClick={() => setSpeedOpen((open) => !open)}><Icon name="speed" /><span>{speed}×</span><Icon name="chevron-up" /></button>{speedOpen && <div className="player-speed-menu" role="menu" aria-label="Chọn tốc độ phát">{speeds.map((value) => <button type="button" role="menuitemradio" aria-checked={speed === value} className={speed === value ? "active" : ""} key={value} onClick={() => changeSpeed(value)}><span>{value}×</span>{speed === value && <Icon name="check" />}</button>)}</div>}</div><a className="player-icon-button" href={source} download={filename} aria-label="Tải băng ghi âm" title="Tải băng ghi âm"><Icon name="export" /></a></div>}</div>{error ? <div className="form-error">{error}</div> : source ? <audio ref={audio} controls controlsList="nodownload noplaybackrate" preload="metadata" src={source} onError={() => setError("Không thể tải băng ghi âm. Vui lòng tải lại trang và thử lại.")} onTimeUpdate={syncTranscript} onSeeking={syncTranscript} onEnded={() => onActiveSegment(undefined)}>Trình duyệt không hỗ trợ phát âm thanh.</audio> : <Loading label="Đang chuẩn bị audio…" />}</section>;
-});
 
-function MeetingContext({ meeting, segmentCount, speakerCount }: { meeting: { status: string; language_mode: string; duration_ms?: number }; segmentCount: number; speakerCount: number }) {
-  return <section className="panel meeting-context"><h2>Thông tin phiên họp</h2><dl><div><dt>Trạng thái</dt><dd><Status value={meeting.status}>{meeting.status}</Status></dd></div><div><dt>Ngôn ngữ</dt><dd>{languageLabel(meeting.language_mode)}</dd></div><div><dt>Người nói</dt><dd>{speakerCount || "Chưa xác định"}</dd></div><div><dt>Phân đoạn</dt><dd>{segmentCount}</dd></div></dl></section>;
-}
+  function syncTranscript() {
+    const sec = audio.current?.currentTime ?? 0;
+    setCurrentTime(sec);
+    const milliseconds = sec * 1000;
 
-function VersionList({ versions }: { versions: { data?: Array<{ id: string; version_no: number; source: string; created_at: string }>; loading: boolean; error?: Error } }) {
-  if (versions.loading) return <Loading />;
-  if (versions.error) return <p>Không tải được lịch sử.</p>;
-  if (!versions.data?.length) return <p>Chưa có phiên bản transcript.</p>;
-  return <ol className="versions">{versions.data.map((version) => <li key={version.id}>v{version.version_no} · {versionSourceLabel(version.source)} · {new Date(version.created_at).toLocaleString("vi-VN")}</li>)}</ol>;
-}
-
-function ConfirmDialog({ title, detail, confirmLabel, close, confirm }: { title: string; detail: string; confirmLabel: string; close: () => void; confirm: () => void }) {
-  return <div className="dialog-backdrop" role="presentation"><section className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title"><h2 id="confirm-title">{title}</h2><p>{detail}</p><div className="dialog-actions"><Button onClick={close}>Hủy</Button><Button tone="danger" onClick={confirm}>{confirmLabel}</Button></div></section></div>;
-}
-
-function RenameMeetingDialog({ title, close, confirm }: { title: string; close: () => void; confirm: (title: string) => Promise<void> }) {
-  const [value, setValue] = useState(title); const [error, setError] = useState(""); const [saving, setSaving] = useState(false);
-  async function submit(event: React.FormEvent) { event.preventDefault(); const next = value.trim(); if (!next) return setError("Tên bản ghi không được để trống."); try { setSaving(true); setError(""); await confirm(next); } catch (cause) { setError((cause as Error).message); setSaving(false); } }
-  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><button className="close" onClick={close} type="button">×</button><h2>Đổi tên bản ghi</h2><label>Tên bản ghi<input autoFocus maxLength={200} value={value} onChange={(event) => setValue(event.target.value)} /></label>{error && <div className="form-error">{error}</div>}<div className="dialog-actions"><Button onClick={close}>Hủy</Button><Button type="submit" tone="dark" disabled={saving}>{saving ? "Đang lưu…" : "Lưu tên"}</Button></div></form></div>;
-}
-
-function SplitDialog({ segment, close, confirm }: { segment: Segment; close: () => void; confirm: (splitAt: number, first: string, second: string) => void }) {
-  const words = segment.text.trim().split(/\s+/);
-  const [splitIndex, setSplitIndex] = useState<number>(Math.max(1, Math.floor(words.length / 2)));
-  const firstText = words.slice(0, splitIndex).join(" ").trim();
-  const secondText = words.slice(splitIndex).join(" ").trim();
-  const ratio = firstText.length / (firstText.length + secondText.length || 1);
-  const estimatedSplitMs = Math.floor(segment.start_ms + (segment.end_ms - segment.start_ms) * ratio);
-  const splitAtMs = Math.max(segment.start_ms + 1, Math.min(segment.end_ms - 1, estimatedSplitMs));
-
-  return <div className="dialog-backdrop" role="presentation">
-    <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="split-title" style={{ width: 600 }}>
-      <h2 id="split-title">Tách bằng câu</h2>
-      <p>Nhấp vào chữ bên dưới để chọn vị trí tách. Đoạn sẽ được chia làm hai.</p>
-      <div className="split-text">
-        {words.map((word, i) => (
-          <span 
-            key={i} 
-            onClick={() => setSplitIndex(Math.max(1, i))}
-            className={`${i >= splitIndex ? "second" : ""} ${i === splitIndex ? "split-point" : ""}`}
-          >
-            {word}{i < words.length - 1 ? " " : ""}
-          </span>
-        ))}
-      </div>
-      <div className="split-preview">
-        <div><strong>Đoạn 1</strong><p>{firstText}</p></div>
-        <div><strong>Đoạn 2</strong><p>{secondText}</p></div>
-      </div>
-      <div className="dialog-actions">
-        <Button onClick={close}>Hủy</Button>
-        <Button tone="dark" disabled={!firstText || !secondText} onClick={() => confirm(splitAtMs, firstText, secondText)}>Tách đoạn</Button>
-      </div>
-    </section>
-  </div>;
-}
-
-export function ShareDialog({ meetingId, title, close }: { meetingId: string; title: string; close: () => void }) {
-  const choices: Array<{ value: EmailAttachmentChoice; label: string; detail: string }> = [
-    { value: "audio", label: "Băng ghi âm", detail: "Tệp âm thanh gốc" },
-    { value: "transcript", label: "Nội dung bóc băng", detail: "Văn bản kèm thời gian và người nói" },
-    { value: "summary", label: "Tóm tắt", detail: "Bản tóm tắt mới nhất" },
-    { value: "translation", label: "Bản dịch", detail: "Bản dịch mới nhất" },
-  ];
-  const [email, setEmail] = useState("");
-  const [attachments, setAttachments] = useState<EmailAttachmentChoice[]>(["transcript"]);
-  const [message, setMessage] = useState("");
-  const [success, setSuccess] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  function toggleAttachment(value: EmailAttachmentChoice) {
-    setAttachments((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
-  }
-
-  async function generateEmailContent() {
-    const sections: string[] = [];
-    if (attachments.includes("summary")) {
-      const summaries = await meetingsApi.summaries(meetingId).catch(() => []);
-      const latest = summaries[summaries.length - 1];
-      if (latest?.current_version?.content) {
-        const text = Object.entries(latest.current_version.content)
-          .map(([k, v]) => `${k}:\n${Array.isArray(v) ? v.join("\n") : typeof v === "object" ? JSON.stringify(v, null, 2) : String(v ?? "")}`)
-          .join("\n\n");
-        sections.push(`📌 TÓM TẮT CUỘC HỌP:\n${text}`);
-      }
-    }
-    if (attachments.includes("translation")) {
-      const translations = await meetingsApi.translations(meetingId).catch(() => []);
-      const latest = translations[translations.length - 1];
-      if (latest?.segments?.length) {
-        const transLines = latest.segments.map((s) => s.text).join("\n");
-        sections.push(`🌐 BẢN DỊCH:\n${transLines}`);
-      }
-    }
-    if (attachments.includes("transcript")) {
-      const transcriptData = await meetingsApi.transcript(meetingId).catch(() => null);
-      if (transcriptData?.segments?.length) {
-        const transLines = transcriptData.segments
-          .map((s) => `[${formatTime(s.start_ms)}] ${s.speaker_label ? s.speaker_label + ": " : ""}${s.text}`)
-          .join("\n");
-        sections.push(`📝 NỘI DUNG BÓC BĂNG:\n${transLines}`);
-      }
-    }
-    if (attachments.includes("audio")) {
-      sections.push(`🎙️ BĂNG GHI ÂM:\nBạn có thể nghe và tải bản ghi âm tại:\n${window.location.origin}/meetings/${meetingId}`);
-    }
-    const emailSubject = `[Bóc Băng] Tài liệu cuộc họp: ${title}`;
-    let emailBody = `Xin chào,\n\nDưới đây là tài liệu cuộc họp "${title}":\n\n`;
-    emailBody += sections.join("\n\n" + "─".repeat(32) + "\n\n");
-    emailBody += `\n\n${"─".repeat(32)}\nTrân trọng,\nBóc Băng AI`;
-    return { emailSubject, emailBody };
-  }
-
-  async function copyContent() {
-    if (attachments.length === 0) {
-      setMessage("Vui lòng chọn ít nhất một tệp đính kèm cần gửi.");
-      setSuccess(false);
+    // When replaying a specific sentence, stop automatically at sentence end
+    if (stopAtMsRef.current !== null && milliseconds >= stopAtMsRef.current) {
+      audio.current?.pause();
+      setIsPlaying(false);
+      stopAtMsRef.current = null;
       return;
     }
-    try {
-      setSending(true);
-      const { emailBody } = await generateEmailContent();
-      await navigator.clipboard.writeText(emailBody);
-      setCopied(true);
-      setSuccess(true);
-      setMessage("Đã sao chép nội dung email vào bộ nhớ tạm.");
-      window.setTimeout(() => setCopied(false), 2500);
-    } catch {
-      setSuccess(false);
-      setMessage("Không thể sao chép vào bộ nhớ tạm.");
-    } finally {
-      setSending(false);
-    }
+
+    const segment = segments.find((item) => item.start_ms <= milliseconds && milliseconds < item.end_ms);
+    onActiveSegment(segment?.logical_segment_id);
   }
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    const recipient = email.trim();
-    if (!recipient) return;
-    if (attachments.length === 0) {
-      setMessage("Vui lòng chọn ít nhất một tệp đính kèm cần gửi.");
-      setSuccess(false);
-      return;
-    }
-    try {
-      setSending(true);
-      setMessage("");
-      const { emailSubject, emailBody } = await generateEmailContent();
-      const mailtoUrl = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
-      window.location.href = mailtoUrl;
-      setSuccess(true);
-      setMessage(`Đang mở ứng dụng email để gửi tài liệu tới “${recipient}”.`);
-    } catch (cause) {
-      setSuccess(false);
-      setMessage(meetingErrorMessage(cause));
-    } finally {
-      setSending(false);
-    }
+  function handleSkip(deltaSec: number) {
+    stopAtMsRef.current = null;
+    if (!audio.current) return;
+    const next = Math.max(0, Math.min(duration, (audio.current.currentTime || 0) + deltaSec));
+    audio.current.currentTime = next;
+    setCurrentTime(next);
+  }
+
+  function formatAudioTime(seconds: number) {
+    if (!seconds || isNaN(seconds)) return "--:--";
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
 
   return (
-    <div className="dialog-backdrop">
-      <section className="dialog" role="dialog" aria-modal="true" style={{ width: 540, maxWidth: "94vw" }}>
-        <button className="close" onClick={close} type="button">×</button>
-        <h2>Chia sẻ tài liệu qua Email</h2>
-        <p>Gửi các tài liệu đã chọn (băng ghi âm, nội dung bóc băng, tóm tắt, bản dịch) tới email người nhận.</p>
+    <>
+      <audio
+        ref={audio}
+        preload="metadata"
+        src={source || undefined}
+        onTimeUpdate={syncTranscript}
+        onLoadedMetadata={() => setDuration(audio.current?.duration ?? 0)}
+        onDurationChange={() => setDuration(audio.current?.duration ?? 0)}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => {
+          setIsPlaying(false);
+          onActiveSegment(undefined);
+        }}
+        style={{ display: "none" }}
+      />
 
-        <form onSubmit={submit}>
-          <label className="field">
-            Email người nhận
-            <input
-              required
-              type="email"
-              placeholder="dongnghiep@congty.com"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-            />
-          </label>
+      {/* FULL BOTTOM AUDIO PLAYER BAR (ẢNH 3 - REDESIGNED) */}
+      {playbackMode && (
+        <div className="full-bottom-audio-bar">
+          <div className="bottom-player-track-line">
+            <span className="player-track-time">{formatAudioTime(currentTime)}</span>
+            <div className="player-slider-container">
+              <input
+                type="range"
+                min={0}
+                max={duration || 100}
+                step={0.1}
+                value={currentTime}
+                onChange={(e) => {
+                  stopAtMsRef.current = null;
+                  const val = Number(e.target.value);
+                  if (audio.current) audio.current.currentTime = val;
+                  setCurrentTime(val);
+                }}
+                className="bottom-player-slider"
+              />
+              <div
+                className="player-slider-fill"
+                style={{ width: `${duration ? (currentTime / duration) * 100 : 0}%` }}
+              />
+            </div>
+            <span className="player-track-time">{formatAudioTime(duration)}</span>
+          </div>
 
-          <div className="field">
-            <span>Tệp đính kèm gửi qua email</span>
-            <div className="share-attachment-options">
-              {choices.map((item) => {
-                const isSelected = attachments.includes(item.value);
-                return (
-                  <label key={item.value} className={`checkbox-row ${isSelected ? "selected" : ""}`}>
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleAttachment(item.value)}
-                    />
-                    <div>
-                      <strong>{item.label}</strong>
-                      <small>{item.detail}</small>
-                    </div>
-                  </label>
-                );
-              })}
+          <div className="bottom-player-controls-row">
+            {/* Left Column: Info & Speed */}
+            <div className="player-left-col">
+              <div className="player-audio-badge">
+                <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M3 18v-6a9 9 0 0 1 18 0v6" />
+                  <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z" />
+                </svg>
+              </div>
+              <div className="player-info-text">
+                <span className="player-label-now">Đang phát lại</span>
+                <span className="player-filename" title={filename || "Bản ghi âm"}>
+                  {filename || "Bản ghi âm cuộc họp"}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="player-speed-badge"
+                onClick={cyclePlaybackSpeed}
+                title="Thay đổi tốc độ phát"
+              >
+                {playbackSpeed}x
+              </button>
+            </div>
+
+            {/* Center: Main Controls */}
+            <div className="player-main-ctrls">
+              <button
+                type="button"
+                className={`player-mini-btn ${shuffle ? "is-active" : ""}`}
+                onClick={() => setShuffle(!shuffle)}
+                title="Phát ngẫu nhiên"
+              >
+                🔀
+              </button>
+              <button
+                type="button"
+                className="player-arrow-btn"
+                onClick={() => handleSkip(-10)}
+                title="Lùi 10 giây"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M11 19l-9-7 9-7v14zM22 19l-9-7 9-7v14z" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="player-circle-play-btn"
+                onClick={() => {
+                  if (!audio.current) return;
+                  if (isPlaying) audio.current.pause();
+                  else void audio.current.play();
+                }}
+                title={isPlaying ? "Tạm dừng" : "Phát"}
+              >
+                {isPlaying ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="4" width="4" height="16" rx="1" />
+                    <rect x="14" y="4" width="4" height="16" rx="1" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style={{ marginLeft: 2 }}>
+                    <polygon points="6 3 20 12 6 21 6 3" />
+                  </svg>
+                )}
+              </button>
+              <button
+                type="button"
+                className="player-arrow-btn"
+                onClick={() => handleSkip(10)}
+                title="Tới 10 giây"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M13 19l9-7-9-7v14zM2 19l9-7-9-7v14z" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Right Column: Volume, Actions & Close */}
+            <div className="player-right-col">
+              <div className="player-vol-wrap">
+                <button
+                  type="button"
+                  className="player-mini-btn"
+                  onClick={() => {
+                    if (!audio.current) return;
+                    audio.current.muted = !audio.current.muted;
+                    setIsMuted(audio.current.muted);
+                  }}
+                  title={isMuted ? "Bật âm thanh" : "Tắt tiếng"}
+                >
+                  {isMuted ? "🔇" : "🔊"}
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.02}
+                  value={isMuted ? 0 : volume}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    setVolume(val);
+                    if (audio.current) {
+                      audio.current.volume = val;
+                      audio.current.muted = val === 0;
+                      setIsMuted(val === 0);
+                    }
+                  }}
+                  className="player-vol-slider"
+                />
+              </div>
+
+              {/* Action Cluster in Playback Bar */}
+              <div className="playback-actions-cluster">
+                {onSummary && (
+                  <button
+                    type="button"
+                    className="player-action-icon-btn"
+                    onClick={onSummary}
+                    title="Tóm tắt AI cuộc họp"
+                  >
+                    <Icon name="sparkles" />
+                  </button>
+                )}
+                {onSpeakers && (
+                  <button
+                    type="button"
+                    className="player-action-icon-btn"
+                    onClick={onSpeakers}
+                    title="Quản lý người nói"
+                  >
+                    <Icon name="speaker" />
+                  </button>
+                )}
+                {onShare && (
+                  <button
+                    type="button"
+                    className="player-action-icon-btn"
+                    onClick={onShare}
+                    title="Chia sẻ cuộc họp"
+                  >
+                    <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                      <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8m-4-6-4-4-4 4m4-4v13" />
+                    </svg>
+                  </button>
+                )}
+                {onExport && (
+                  <button
+                    type="button"
+                    className="player-action-icon-btn"
+                    onClick={onExport}
+                    title="Xuất nội dung"
+                  >
+                    <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="16" y1="13" x2="8" y2="13" />
+                      <line x1="16" y1="17" x2="8" y2="17" />
+                      <polyline points="10 9 9 9 8 9" />
+                    </svg>
+                  </button>
+                )}
+                {downloadUrl && (
+                  <a
+                    className="player-action-icon-btn"
+                    href={downloadUrl}
+                    download={filename}
+                    title="Tải tệp âm thanh"
+                  >
+                    <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4m4-5 5 5 5-5m-5 5V3" />
+                    </svg>
+                  </a>
+                )}
+              </div>
+
+              {onClosePlayback && (
+                <button
+                  type="button"
+                  className="player-close-pill-btn"
+                  onClick={onClosePlayback}
+                  title="Đóng thanh nghe lại, quay về thanh công cụ"
+                >
+                  <Icon name="close" />
+                  <span>Đóng</span>
+                </button>
+              )}
             </div>
           </div>
-
-          {message && <div className={success ? "notice" : "form-error"}>{message}</div>}
-
-          <div className="dialog-actions" style={{ flexWrap: "wrap", gap: 8, justifyContent: "flex-end" }}>
-            <Button onClick={close} type="button">Đóng</Button>
-            <Button onClick={() => void copyContent()} type="button" disabled={sending}>
-              {copied ? "✓ Đã sao chép" : "Sao chép nội dung"}
-            </Button>
-            <Button type="submit" tone="dark" disabled={sending}>
-              {sending ? "Đang chuẩn bị…" : "Gửi qua Email"}
-            </Button>
-          </div>
-        </form>
-      </section>
-    </div>
+        </div>
+      )}
+    </>
   );
-}
-
-function CommentsPanel({ meetingId, canComment, owner, currentUserId, comments }: { meetingId: string; canComment: boolean; owner: boolean; currentUserId?: string; comments: { data?: Comment[]; setData: React.Dispatch<React.SetStateAction<Comment[] | undefined>>; loading: boolean; error?: Error; reload: () => Promise<void> } }) {
-  const [body, setBody] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [editing, setEditing] = useState<{ id: string; body: string }>();
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!body.trim()) return;
-    setSubmitting(true);
-    try {
-      const comment = await meetingsApi.addComment(meetingId, body.trim());
-      comments.setData((items) => [...(items ?? []), comment]);
-      setBody("");
-      setError("");
-    } catch (cause) {
-      setError(meetingErrorMessage(cause));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function update() {
-    if (!editing) return;
-    const text = editing.body.trim();
-    if (!text) return setError("Bình luận không được để trống.");
-    try {
-      const comment = await meetingsApi.updateComment(editing.id, text);
-      comments.setData((items) => items?.map((item) => item.id === comment.id ? comment : item));
-      setEditing(undefined);
-      setError("");
-    } catch (cause) {
-      setError(meetingErrorMessage(cause));
-    }
-  }
-
-  async function remove(id: string) {
-    try {
-      await meetingsApi.deleteComment(id);
-      comments.setData((items) => items?.filter((item) => item.id !== id));
-      setError("");
-    } catch (cause) {
-      setError(meetingErrorMessage(cause));
-    }
-  }
-
-  return <section className="panel comments-panel">
-    <h2>Bình luận</h2>
-    {comments.loading && <Loading label="Đang tải bình luận…" />}
-    {comments.error && <Failure error={comments.error} retry={comments.reload} />}
-    {!comments.loading && !comments.error && !comments.data?.length && <p className="muted">Chưa có bình luận.</p>}
-    <div className="comment-list">{comments.data?.map((comment) => {
-      const own = (comment.author_user_id || comment.author_id) === currentUserId;
-      const authorName = comment.author_name || (own ? "Bạn" : "Người dùng");
-      const initials = authorName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase();
-      const text = comment.content || comment.body || "";
-      return <article className="comment-card" key={comment.id}>
-        <div className="comment-avatar" aria-hidden="true">
-          {comment.author_avatar_url ? (
-            <img src={comment.author_avatar_url} alt="" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} referrerPolicy="no-referrer" />
-          ) : (
-            <span>{initials || "?"}</span>
-          )}
-        </div>
-        <div className="comment-main">
-          <header><strong>{authorName}{own && <small>Bạn</small>}</strong><time dateTime={comment.created_at}>{new Date(comment.created_at).toLocaleString("vi-VN")}</time></header>
-          {editing?.id === comment.id ? <div className="comment-editor"><textarea aria-label="Sửa bình luận" value={editing.body} onChange={(event) => setEditing({ ...editing, body: event.target.value })} /><div><Button tone="dark" onClick={() => void update()}>Lưu</Button><Button onClick={() => setEditing(undefined)}>Hủy</Button></div></div> : <><p>{text}</p><div className="comment-actions">{own && <Button onClick={() => setEditing({ id: comment.id, body: text })}>Sửa</Button>}{(own || owner) && <Button tone="danger" onClick={() => void remove(comment.id)}>Xóa</Button>}</div></>}
-        </div>
-      </article>;
-    })}</div>
-    {canComment ? <form className="comments-form" onSubmit={submit}><textarea aria-label="Bình luận" placeholder="Viết bình luận…" value={body} required onChange={(event) => setBody(event.target.value)} /><Button type="submit" tone="dark" disabled={submitting || !body.trim()}>{submitting ? "Đang gửi…" : "Gửi bình luận"}</Button>{error && <div className="form-error">{error}</div>}</form> : <p>Bạn chỉ có quyền xem bình luận.</p>}
-  </section>;
-}
+});
 
 function RecordingPanel({
   meetingId,
@@ -835,7 +2167,16 @@ function RecordingPanel({
   onComplete,
   onRecordingStateChange,
   hasStartedBefore,
+  hasAudio,
   initialElapsedMs,
+  targetLang,
+  onTargetLangChange,
+  onPlayback,
+  playbackMode,
+  onShare,
+  onSummary,
+  onExport,
+  onSpeakers,
 }: {
   meetingId: string;
   targetLanguage?: string;
@@ -848,25 +2189,57 @@ function RecordingPanel({
   onComplete: () => void;
   onRecordingStateChange: (active: boolean) => void;
   hasStartedBefore?: boolean;
+  hasAudio?: boolean;
   initialElapsedMs: number;
+  targetLang: string;
+  onTargetLangChange: (lang: string) => void;
+  onPlayback?: () => void;
+  playbackMode?: boolean;
+  onShare: () => void;
+  onSummary: () => void;
+  onExport?: () => void;
+  onSpeakers: () => void;
 }) {
   const { accessToken } = useAuth();
   const socket = useRef<MeetingSocket | undefined>(undefined);
   const capture = useRef<MicrophonePcmCapture | undefined>(undefined);
   const startedAt = useRef<number | undefined>(undefined);
   const elapsedBeforePause = useRef(Math.floor(initialElapsedMs / 1000));
-  const translationEnabled = useRef(false);
+  const translationEnabled = useRef(true);
   const finalSegmentIds = useRef(new Set<string>());
   const finalTurnIds = useRef(new Set<string>());
   const translatedSegmentIds = useRef(new Set<string>());
   const [status, setStatus] = useState("Sẵn sàng ghi âm");
   const [translationStatus, setTranslationStatus] = useState("");
   const [fallbackWarning, setFallbackWarning] = useState("");
-  const [state, setState] = useState<"idle" | "connecting" | "recording" | "paused" | "stopping" | "stopped" | "failed">("idle");
+  const [state, setState] = useState<"idle" | "connecting" | "recording" | "paused" | "stopping" | "stopped" | "failed">(
+    "idle"
+  );
   const [elapsed, setElapsed] = useState(Math.floor(initialElapsedMs / 1000));
 
-  useEffect(() => () => { void stop(true); }, []);
-  useEffect(() => onRecordingStateChange(state !== "idle" && state !== "stopped" && state !== "failed"), [state, onRecordingStateChange]);
+  useEffect(() => () => {
+    void stop(true);
+  }, []);
+
+  useEffect(() => {
+    const handleStartEvent = () => {
+      if (state === "idle" || state === "failed") {
+        void start();
+      }
+    };
+    window.addEventListener("bocbang:start-recording", handleStartEvent);
+    return () => window.removeEventListener("bocbang:start-recording", handleStartEvent);
+  }, [state]);
+
+  useEffect(() => {
+    if (state === "recording" && targetLanguage && socket.current) {
+      socket.current.enableTranslation(targetLanguage, missingTranslationIds());
+    }
+  }, [targetLanguage, state]);
+  useEffect(
+    () => onRecordingStateChange(state !== "idle" && state !== "stopped" && state !== "failed"),
+    [state, onRecordingStateChange]
+  );
   useEffect(() => {
     if (state !== "idle") return;
     const initialSeconds = Math.floor(initialElapsedMs / 1000);
@@ -875,7 +2248,10 @@ function RecordingPanel({
   }, [initialElapsedMs, state]);
   useEffect(() => {
     if (state !== "recording") return;
-    const timer = window.setInterval(() => setElapsed(elapsedBeforePause.current + Math.floor((Date.now() - (startedAt.current ?? Date.now())) / 1000)), 1000);
+    const timer = window.setInterval(
+      () => setElapsed(elapsedBeforePause.current + Math.floor((Date.now() - (startedAt.current ?? Date.now())) / 1000)),
+      1000
+    );
     return () => window.clearInterval(timer);
   }, [state]);
 
@@ -895,7 +2271,7 @@ function RecordingPanel({
       void capture.current?.resume();
       setState("recording");
       setStatus("Đang ghi âm và nhận transcript trực tiếp.");
-      setFallbackWarning(event.fallback_active ? "Đang chép lời dự phòng; nhận diện theo tên tạm thời không khả dụng." : "");
+      setFallbackWarning(event.fallback_active ? "Đang chép lời dự phòng." : "");
       startedAt.current = Date.now();
       if (translationEnabled.current && targetLanguage) {
         socket.current?.enableTranslation(targetLanguage, missingTranslationIds());
@@ -953,13 +2329,17 @@ function RecordingPanel({
           void capture.current?.pause();
           setStatus("Mất kết nối, đang thử kết nối lại…");
         }
-        if (next === "closed") setState((current) => (current === "stopped" || current === "stopping") ? "stopped" : "failed");
+        if (next === "closed") setState((current) => (current === "stopped" || current === "stopping" ? "stopped" : "failed"));
       });
       socket.current.connect();
     } catch (cause) {
       await releaseCapture(false);
       setState("failed");
-      setStatus(cause instanceof DOMException && cause.name === "NotAllowedError" ? "Cần cấp quyền microphone để ghi âm." : (cause as Error).message);
+      setStatus(
+        cause instanceof DOMException && cause.name === "NotAllowedError"
+          ? "Cần cấp quyền microphone để ghi âm."
+          : (cause as Error).message
+      );
     }
   }
 
@@ -1010,7 +2390,7 @@ function RecordingPanel({
       setStatus("Đã kết thúc ghi âm.");
       onComplete();
     } catch {
-      // Sẽ nhận qua socket meeting.status hoặc người dùng bấm Kết thúc
+      // ignore
     }
   }
 
@@ -1028,72 +2408,962 @@ function RecordingPanel({
     }
   }
 
-  const canToggleTranslation = state === "recording" || state === "paused" || state === "stopping";
   return (
-    <section className="panel recording-panel">
-      <div className="recording-heading">
-        <div>
-          <h2>Ghi âm</h2>
-          <p>{status}</p>
+    <div className="docked-bottom-bar-wrap">
+      {state === "failed" && status && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 12px)",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "#2f1515",
+            border: "1px solid #ef4444",
+            color: "#fca5a5",
+            padding: "8px 16px",
+            borderRadius: 8,
+            fontSize: 13,
+            maxWidth: 520,
+            textAlign: "center",
+            boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
+            zIndex: 100,
+            whiteSpace: "normal",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <span>{status}</span>
+          <button
+            type="button"
+            onClick={() => setStatus("")}
+            style={{
+              background: "none",
+              border: "none",
+              color: "#fca5a5",
+              cursor: "pointer",
+              fontSize: 16,
+              lineHeight: 1,
+              padding: "0 4px",
+            }}
+            title="Đóng thông báo"
+          >
+            ×
+          </button>
         </div>
-        <strong className="recording-timer">{formatDuration(elapsed)}</strong>
-      </div>
-      {fallbackWarning && <div className="notice" style={{ marginTop: 10 }}>{fallbackWarning}</div>}
-      {translationStatus && <p className="realtime-translation-status">{translationStatus}</p>}
-      <div className="recording-actions">
+      )}
+      <div className="docked-bottom-bar is-recording-bar">
         {(state === "idle" || state === "failed") && (
-          <>
-            <Button tone="dark" onClick={() => void start()}>
-              {state === "failed" ? "Kết nối lại" : (hasStartedBefore ? "Tiếp tục ghi âm" : "Bắt đầu ghi âm")}
-            </Button>
-            {hasStartedBefore && <Button tone="danger" onClick={() => void finishExisting()}>Kết thúc</Button>}
-          </>
+          <button
+            type="button"
+            className="docked-record-pill"
+            onClick={() => void start()}
+            title={state === "failed" ? "Kết nối lại" : hasStartedBefore ? "Tiếp tục ghi âm" : "Bắt đầu ghi âm"}
+          >
+            <span className="record-red-dot" />
+            <span>{state === "failed" ? "Kết nối lại" : hasStartedBefore ? "Tiếp tục ghi âm" : "Bắt đầu ghi âm"}</span>
+            <span className="docked-tooltip">Bắt đầu ghi âm</span>
+          </button>
         )}
-        {state === "connecting" && <Button disabled>Đang kết nối…</Button>}
+
+        {state === "connecting" && (
+          <button type="button" className="docked-record-pill is-connecting" disabled>
+            <span className="record-pulsing-dot red" />
+            <span>Đang kết nối mic…</span>
+          </button>
+        )}
+
         {state === "recording" && (
-          <>
-            <Button onClick={() => void pause()}>Tạm dừng</Button>
-            <Button tone="danger" onClick={() => void stop()}>Kết thúc</Button>
-          </>
+          <div className="docked-record-active-group">
+            <div className="docked-record-timer-badge">
+              <span className="record-pulsing-dot red" />
+              <span>{formatDuration(elapsed)}</span>
+            </div>
+            <button
+              type="button"
+              className="docked-record-action-btn pause"
+              onClick={() => void pause()}
+              title="Tạm dừng ghi âm"
+            >
+              <svg className="icon" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="4" width="4" height="16" rx="1" />
+                <rect x="14" y="4" width="4" height="16" rx="1" />
+              </svg>
+              <span>Tạm dừng</span>
+              <span className="docked-tooltip">Tạm dừng</span>
+            </button>
+            <button
+              type="button"
+              className="docked-record-action-btn stop"
+              onClick={() => void stop()}
+              title="Kết thúc và lưu bản ghi"
+            >
+              <svg className="icon" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+              <span>Kết thúc</span>
+              <span className="docked-tooltip">Kết thúc &amp; Lưu</span>
+            </button>
+          </div>
         )}
+
         {state === "paused" && (
-          <>
-            <Button tone="dark" onClick={() => void resume()}>Tiếp tục</Button>
-            <Button tone="danger" onClick={() => void stop()}>Kết thúc</Button>
-          </>
+          <div className="docked-record-active-group">
+            <div className="docked-record-timer-badge is-paused">
+              <span className="record-pulsing-dot amber" />
+              <span>{formatDuration(elapsed)} (Tạm dừng)</span>
+            </div>
+            <button
+              type="button"
+              className="docked-record-action-btn resume"
+              onClick={() => void resume()}
+              title="Tiếp tục ghi âm"
+            >
+              <Icon name="play" />
+              <span>Tiếp tục</span>
+              <span className="docked-tooltip">Tiếp tục ghi âm</span>
+            </button>
+            <button
+              type="button"
+              className="docked-record-action-btn stop"
+              onClick={() => void stop()}
+              title="Kết thúc và lưu bản ghi"
+            >
+              <svg className="icon" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+              <span>Kết thúc</span>
+              <span className="docked-tooltip">Kết thúc &amp; Lưu</span>
+            </button>
+          </div>
         )}
-        {state === "stopping" && <Button disabled>Đang kết thúc…</Button>}
-        {state === "stopped" && <Button disabled>Đã kết thúc</Button>}
-        {canToggleTranslation && (
-          <Button disabled={!targetLanguage} onClick={toggleTranslation}>
-            {targetLanguage ? (translationVisible ? "Ẩn bản dịch" : "Dịch trực tiếp") : "Không thể dịch"}
-          </Button>
+
+        {state === "stopping" && (
+          <button type="button" className="docked-record-pill is-connecting" disabled>
+            <span>Đang hoàn tất bản ghi…</span>
+          </button>
         )}
+
+        {state === "stopped" && (
+          <button type="button" className="docked-record-pill is-connecting" disabled>
+            <span>Đã kết thúc</span>
+          </button>
+        )}
+
+        {hasStartedBefore && state === "idle" && (
+          <button
+            type="button"
+            className="docked-record-action-btn stop"
+            onClick={() => void finishExisting()}
+            title="Hoàn tất bản ghi hiện tại"
+          >
+            <Icon name="check" />
+            <span>Hoàn tất</span>
+            <span className="docked-tooltip">Hoàn tất bản ghi</span>
+          </button>
+        )}
+
+        {/* Blue Playback pill button (ON THE LEFT - ONLY WHEN THERE IS RECORDING) */}
+        {hasAudio && onPlayback && (state === "idle" || state === "stopped" || state === "failed") && (
+          <button
+            type="button"
+            className="docked-play-pill"
+            onClick={onPlayback}
+            title="Phát lại bản ghi"
+          >
+            <Icon name="play" />
+            <span>Phát lại bản ghi</span>
+            <span className="docked-tooltip">Phát lại bản ghi</span>
+          </button>
+        )}
+
+        {/* Target language selector */}
+        <select
+          className="docked-lang-pill"
+          value={targetLang.toUpperCase()}
+          onChange={(e) => onTargetLangChange(e.target.value.toLowerCase())}
+          title="Ngôn ngữ dịch"
+          style={{
+            width: 58,
+            minWidth: 58,
+            maxWidth: 58,
+            height: 36,
+            padding: "0 6px",
+            borderRadius: 8,
+            background: "#2a2b32",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.15)",
+            fontWeight: 700,
+            fontSize: 13,
+            flexShrink: 0,
+            textAlign: "center",
+          }}
+        >
+          <option value="VI">VI</option>
+          <option value="EN">EN</option>
+        </select>
+
+        {/* Share icon */}
+        <button
+          type="button"
+          className="docked-icon-btn"
+          onClick={onShare}
+          title="Chia sẻ cuộc họp"
+        >
+          <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8m-4-6-4-4-4 4m4-4v13" />
+          </svg>
+          <span className="docked-tooltip">Chia sẻ cuộc họp</span>
+        </button>
+
+        {/* AI Summary icon */}
+        <button
+          type="button"
+          className="docked-icon-btn"
+          onClick={onSummary}
+          title="Tóm tắt AI"
+        >
+          <Icon name="sparkles" />
+          <span className="docked-tooltip">Tóm tắt AI</span>
+        </button>
+
+        {/* Export icon */}
+        {onExport && (
+          <button
+            type="button"
+            className="docked-icon-btn"
+            onClick={onExport}
+            title="Xuất nội dung (PDF, Word, Audio)"
+          >
+            <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+              <polyline points="10 9 9 9 8 9" />
+            </svg>
+            <span className="docked-tooltip">Xuất nội dung</span>
+          </button>
+        )}
+
+        {/* Speaker management icon */}
+        <button
+          type="button"
+          className="docked-icon-btn"
+          onClick={onSpeakers}
+          title="Quản lý người nói"
+        >
+          <Icon name="speaker" />
+          <span className="docked-tooltip">Quản lý người nói</span>
+        </button>
       </div>
-    </section>
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  title,
+  detail,
+  confirmLabel,
+  close,
+  confirm,
+}: {
+  title: string;
+  detail: string;
+  confirmLabel: string;
+  close: () => void;
+  confirm: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <section className="dialog" role="alertdialog" aria-modal="true" style={{ width: 440 }}>
+        <h2>{title}</h2>
+        <p>{detail}</p>
+        <div className="dialog-actions">
+          <Button onClick={close}>Hủy</Button>
+          <Button tone="danger" onClick={confirm}>
+            {confirmLabel}
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RenameMeetingDialog({
+  title,
+  close,
+  confirm,
+}: {
+  title: string;
+  close: () => void;
+  confirm: (title: string) => Promise<void>;
+}) {
+  const [value, setValue] = useState(title);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const next = value.trim();
+    if (!next) return setError("Tên bản ghi không được để trống.");
+    try {
+      setSaving(true);
+      setError("");
+      await confirm(next);
+    } catch (cause) {
+      setError((cause as Error).message);
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop">
+      <form className="dialog" onSubmit={submit} style={{ width: 440 }}>
+        <button className="close" onClick={close} type="button">
+          ×
+        </button>
+        <h2>Đổi tên bản ghi</h2>
+        <label style={{ marginTop: 14 }}>
+          Tên bản ghi
+          <input autoFocus maxLength={200} value={value} onChange={(event) => setValue(event.target.value)} />
+        </label>
+        {error && <div className="form-error">{error}</div>}
+        <div className="dialog-actions" style={{ marginTop: 20 }}>
+          <Button onClick={close}>Hủy</Button>
+          <Button type="submit" tone="dark" disabled={saving}>
+            {saving ? "Đang lưu…" : "Lưu tên"}
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function SplitDialog({
+  segment,
+  close,
+  confirm,
+}: {
+  segment: Segment;
+  close: () => void;
+  confirm: (splitAt: number, first: string, second: string) => void;
+}) {
+  const words = segment.text.trim().split(/\s+/);
+  const [splitIndex, setSplitIndex] = useState<number>(Math.max(1, Math.floor(words.length / 2)));
+  const firstText = words.slice(0, splitIndex).join(" ").trim();
+  const secondText = words.slice(splitIndex).join(" ").trim();
+  const ratio = firstText.length / (firstText.length + secondText.length || 1);
+  const estimatedSplitMs = Math.floor(segment.start_ms + (segment.end_ms - segment.start_ms) * ratio);
+  const splitAtMs = Math.max(segment.start_ms + 1, Math.min(segment.end_ms - 1, estimatedSplitMs));
+
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <section className="dialog" role="dialog" aria-modal="true" style={{ width: 600 }}>
+        <h2>Tách bằng câu</h2>
+        <p>Nhấp vào chữ bên dưới để chọn vị trí tách. Đoạn sẽ được chia làm hai.</p>
+        <div className="split-text">
+          {words.map((word, i) => (
+            <span
+              key={i}
+              onClick={() => setSplitIndex(Math.max(1, i))}
+              className={`${i >= splitIndex ? "second" : ""} ${i === splitIndex ? "split-point" : ""}`}
+            >
+              {word}
+              {i < words.length - 1 ? " " : ""}
+            </span>
+          ))}
+        </div>
+        <div className="split-preview">
+          <div>
+            <strong>Đoạn 1</strong>
+            <p>{firstText}</p>
+          </div>
+          <div>
+            <strong>Đoạn 2</strong>
+            <p>{secondText}</p>
+          </div>
+        </div>
+        <div className="dialog-actions">
+          <Button onClick={close}>Hủy</Button>
+          <Button
+            tone="dark"
+            disabled={!firstText || !secondText}
+            onClick={() => confirm(splitAtMs, firstText, secondText)}
+          >
+            Tách đoạn
+          </Button>
+        </div>
+      </section>
+    </div>
   );
 }
 
 function meetingErrorMessage(cause: unknown) {
   if (cause instanceof ApiError) {
-    if (cause.code === "SEGMENTS_NOT_MERGEABLE") return "Các đoạn được chọn phải nằm liền nhau trong nội dung hiện tại.";
-    if (cause.code === "USER_NOT_FOUND") return "Email này chưa có tài khoản Bóc Băng. Người nhận cần đăng ký trước bằng đúng email.";
-    if (cause.code === "EMAIL_DELIVERY_FAILED") return "Đã có lỗi khi gửi email. Vui lòng kiểm tra địa chỉ và thử lại.";
+    if (cause.code === "SEGMENTS_NOT_MERGEABLE") return "Các đoạn được chọn phải nằm liền nhau.";
+    if (cause.code === "USER_NOT_FOUND") return "Email này chưa có tài khoản Bóc Băng.";
   }
   const message = cause instanceof Error ? cause.message : "Không thể thực hiện thao tác.";
-  if (message === "Segments must be contiguous and have the same speaker.") return "Chỉ có thể gộp hai đoạn liền kề của cùng một người nói.";
+  if (message === "Segments must be contiguous and have the same speaker.")
+    return "Chỉ có thể gộp hai đoạn liền kề của cùng một người nói.";
   return message;
 }
 
-function versionSourceLabel(source: string) {
-  return ({ stt: "Nhận dạng giọng nói", user_edit: "Chỉnh sửa thủ công", rollback: "Khôi phục" } as Record<string, string>)[source] ?? source;
-}
-
-function formatTime(milliseconds: number) {
+function formatTime(milliseconds?: number) {
+  if (milliseconds === undefined) return "--:--";
   const seconds = Math.floor(milliseconds / 1000);
-  return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
+  return `${Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
 function formatDuration(seconds: number) {
-  return `${Math.floor(seconds / 3600).toString().padStart(2, "0")}:${Math.floor((seconds % 3600) / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
+  return `${Math.floor(seconds / 3600)
+    .toString()
+    .padStart(2, "0")}:${Math.floor((seconds % 3600) / 60)
+    .toString()
+    .padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
+}
+
+/* ═══════════════════════════════════════════
+   MODAL: VIEW LOG AI (ẢNH 4)
+═══════════════════════════════════════════ */
+function LogAiModal({ close, meetingTitle }: { close: () => void; meetingTitle: string }) {
+  const logs = [
+    { time: "10:14:02.12", level: "CONNECT", msg: `Phiên kết nối STT khởi tạo cho "${meetingTitle}"` },
+    { time: "10:14:02.35", level: "AUDIO", msg: "Microphone PCM / Audio streaming active (16kHz, mono)" },
+    { time: "10:14:03.90", level: "MODEL", msg: "Pipeline: Gemini Flash Realtime Engine initialized" },
+    { time: "10:14:04.18", level: "STT", msg: "Segment chunk decoded (confidence: 0.985, latency: 118ms)" },
+    { time: "10:14:04.22", level: "DIARIZATION", msg: "Voice embedding matched: Speaker 1" },
+    { time: "10:14:07.45", level: "TRANSLATE", msg: "Realtime bilingual sync (VI <-> EN) active" },
+    { time: "10:14:12.80", level: "SYNC", msg: "Audio-transcript timestamp synchronized" },
+  ];
+
+  return (
+    <div className="dialog-backdrop" onClick={close}>
+      <div
+        className="dialog"
+        style={{ width: 620, maxWidth: "94vw", background: "#111827", color: "#f9fafb" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 16 }}>⚡</span>
+            <h2 style={{ margin: 0, fontSize: 16, color: "#fff" }}>AI Real-time Diagnostics Log</h2>
+          </div>
+          <button className="close" onClick={close} type="button" style={{ color: "#9ca3af" }}>
+            ×
+          </button>
+        </div>
+        <p style={{ margin: "0 0 14px", fontSize: 13, color: "#9ca3af" }}>
+          Thông tin chi tiết về pipeline bóc băng, nhận diện người nói và độ trễ mô hình AI.
+        </p>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <span style={{ fontSize: 11, background: "rgba(16, 185, 129, 0.2)", color: "#34d399", padding: "3px 8px", borderRadius: 4, fontWeight: 600 }}>
+            ● CONNECTED
+          </span>
+          <span style={{ fontSize: 11, background: "rgba(59, 130, 246, 0.2)", color: "#60a5fa", padding: "3px 8px", borderRadius: 4, fontWeight: 600 }}>
+            Gemini STT
+          </span>
+          <span style={{ fontSize: 11, background: "rgba(245, 158, 11, 0.2)", color: "#fbbf24", padding: "3px 8px", borderRadius: 4, fontWeight: 600 }}>
+            Latency: ~118ms
+          </span>
+        </div>
+
+        <div
+          style={{
+            background: "#030712",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderRadius: 8,
+            padding: 12,
+            height: 260,
+            overflowY: "auto",
+            fontFamily: "monospace",
+            fontSize: 12,
+            lineHeight: 1.6,
+          }}
+        >
+          {logs.map((item, idx) => (
+            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+              <span style={{ color: "#6b7280" }}>[{item.time}]</span>
+              <span
+                style={{
+                  color:
+                    item.level === "CONNECT"
+                      ? "#34d399"
+                      : item.level === "MODEL"
+                      ? "#a78bfa"
+                      : item.level === "STT"
+                      ? "#38bdf8"
+                      : "#fbbf24",
+                  fontWeight: 700,
+                }}
+              >
+                [{item.level}]
+              </span>
+              <span style={{ color: "#e5e7eb" }}>{item.msg}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="dialog-actions" style={{ marginTop: 16 }}>
+          <Button tone="dark" onClick={close}>
+            Đóng
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ═══════════════════════════════════════════
+   MODAL: CHIA SẺ SOCIAL (ẢNH 1)
+═══════════════════════════════════════════ */
+function ShareSocialModal({ meetingTitle, close }: { meetingTitle: string; close: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const shareUrl = window.location.href;
+
+  function handleCopy() {
+    void copyToClipboard(shareUrl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  function openShare(type: string) {
+    const encodedUrl = encodeURIComponent(shareUrl);
+    const encodedTitle = encodeURIComponent(meetingTitle);
+    let url = "";
+    if (type === "facebook") url = `https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}`;
+    else if (type === "messenger") url = `https://www.facebook.com/dialog/send?link=${encodedUrl}&app_id=1091931238593&redirect_uri=${encodedUrl}`;
+    else if (type === "x") url = `https://twitter.com/intent/tweet?url=${encodedUrl}&text=${encodedTitle}`;
+    else if (type === "telegram") url = `https://t.me/share/url?url=${encodedUrl}&text=${encodedTitle}`;
+    else if (type === "whatsapp") url = `https://api.whatsapp.com/send?text=${encodedTitle}%20${encodedUrl}`;
+    else if (type === "viber") url = `viber://forward?text=${encodedTitle}%20${encodedUrl}`;
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  return (
+    <div className="dialog-backdrop" onClick={close}>
+      <div className="share-social-card" onClick={(e) => e.stopPropagation()}>
+        <div className="share-social-header">
+          <strong>Chia sẻ</strong>
+          <button type="button" className="close" onClick={close} aria-label="Đóng">✕</button>
+        </div>
+        {copied && <div className="share-social-copied-toast">Đã sao chép liên kết vào bộ nhớ tạm!</div>}
+        <div className="share-social-grid">
+          <button type="button" className="share-social-btn" onClick={handleCopy}>
+            <span className="share-social-icon copy-icon">🔗</span>
+            <small>Copy Link</small>
+          </button>
+          <button type="button" className="share-social-btn" onClick={() => openShare("facebook")}>
+            <span className="share-social-icon fb-icon">f</span>
+            <small>Facebook</small>
+          </button>
+          <button type="button" className="share-social-btn" onClick={() => openShare("messenger")}>
+            <span className="share-social-icon msg-icon">💬</span>
+            <small>Messenger</small>
+          </button>
+          <button type="button" className="share-social-btn" onClick={() => openShare("x")}>
+            <span className="share-social-icon x-icon">𝕏</span>
+            <small>X</small>
+          </button>
+          <button type="button" className="share-social-btn" onClick={() => openShare("telegram")}>
+            <span className="share-social-icon tg-icon">✈</span>
+            <small>Telegram</small>
+          </button>
+          <button type="button" className="share-social-btn" onClick={() => openShare("whatsapp")}>
+            <span className="share-social-icon wa-icon">📞</span>
+            <small>WhatsApp</small>
+          </button>
+          <button type="button" className="share-social-btn" onClick={() => openShare("viber")}>
+            <span className="share-social-icon vb-icon">📱</span>
+            <small>Viber</small>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   MODAL: XUẤT NỘI DUNG (ẢNH 4)
+═══════════════════════════════════════════ */
+function ExportContentModal({
+  meetingId,
+  meetingTitle,
+  mediaId,
+  close,
+}: {
+  meetingId: string;
+  meetingTitle: string;
+  mediaId?: string;
+  close: () => void;
+}) {
+  const [loading, setLoading] = useState<string | null>(null);
+
+  async function handleExport(format: "pdf" | "docx" | "audio") {
+    if (format === "audio") {
+      if (!mediaId) {
+        alert("Bản ghi chưa có tệp âm thanh.");
+        return;
+      }
+      window.location.href = `/api/v1/meetings/${meetingId}/media/${mediaId}/download`;
+      close();
+      return;
+    }
+
+    try {
+      setLoading(format);
+      const artifact = await meetingsApi.export(meetingId, format, {
+        include_timestamps: true,
+        include_speakers: true,
+        include_translation: true,
+        include_summary: false,
+        content_mode: "bilingual",
+      });
+      const blob = await meetingsApi.downloadExport(artifact.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = artifact.filename ?? `${meetingTitle}.${format === "docx" ? "docx" : "pdf"}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      close();
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop" onClick={close}>
+      <div className="export-content-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="export-content-header">
+          <strong>Xuất nội dung</strong>
+          <button type="button" className="close" onClick={close} aria-label="Đóng">✕</button>
+        </div>
+        <div className="export-content-buttons">
+          <button
+            type="button"
+            className="export-btn-primary"
+            onClick={() => void handleExport("pdf")}
+            disabled={loading !== null}
+          >
+            {loading === "pdf" ? "Đang xuất PDF…" : "Xuất PDF"}
+          </button>
+          <button
+            type="button"
+            className="export-btn-secondary"
+            onClick={() => void handleExport("docx")}
+            disabled={loading !== null}
+          >
+            {loading === "docx" ? "Đang xuất DOC…" : "Xuất DOC"}
+          </button>
+          <button
+            type="button"
+            className="export-btn-secondary"
+            onClick={() => void handleExport("audio")}
+            disabled={loading !== null}
+          >
+            Xuất Audio
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   MODAL: QUẢN LÝ NGƯỜI NÓI (ẢNH 5)
+═══════════════════════════════════════════ */
+function SpeakerManagementModal({
+  meetingId,
+  speakers,
+  editable,
+  close,
+}: {
+  meetingId: string;
+  speakers: any;
+  editable: boolean;
+  close: () => void;
+}) {
+  const [fullName, setFullName] = useState("");
+  const [role, setRole] = useState("");
+  const [organization, setOrganization] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  // Search filter
+  const [searchName, setSearchName] = useState("");
+  const [searchRole, setSearchRole] = useState("");
+  const [searchOrg, setSearchOrg] = useState("");
+
+  const systemSpeakers = [
+    { id: "sys-1", name: "test", role: "Trợ lý", organization: "Test" },
+    { id: "sys-2", name: "admin", role: "Giám đốc", organization: "Test" },
+    { id: "sys-3", name: "Phát 1", role: "Giám đốc hệ điều hành", organization: "TP" },
+    { id: "sys-4", name: "Phát 1", role: "Giám đốc hệ điều hành", organization: "TP" },
+    { id: "sys-5", name: "Administrator", role: "AdminDev", organization: "H2O" },
+    { id: "sys-6", name: "Vũ (4)", role: "", organization: "" },
+    { id: "sys-7", name: "Vũ (5)", role: "", organization: "" },
+    { id: "sys-8", name: "Vũ (6)", role: "Nhân viên", organization: "Phòng BE" },
+    { id: "sys-9", name: "Vũ (3)", role: "abc", organization: "1" },
+    { id: "sys-10", name: "Vũ (2)", role: "abc", organization: "1" },
+  ];
+
+  const currentSpeakers: any[] = speakers.data ?? [];
+
+  async function handleCreateSpeaker(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    if (!fullName.trim()) return;
+    try {
+      setLoading(true);
+      const created = await meetingsApi.createSpeaker(meetingId, {
+        name: fullName.trim(),
+        role: role.trim() || undefined,
+        organization: organization.trim() || undefined,
+      });
+      speakers.setData((cur: any) => [...(cur ?? []), created]);
+      setFullName("");
+      setRole("");
+      setOrganization("");
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleAddFromSystem(spk: { name: string; role?: string; organization?: string }) {
+    try {
+      setLoading(true);
+      const created = await meetingsApi.createSpeaker(meetingId, {
+        name: spk.name,
+        role: spk.role || undefined,
+        organization: spk.organization || undefined,
+      });
+      speakers.setData((cur: any) => [...(cur ?? []), created]);
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleRemoveSpeaker(id: string) {
+    try {
+      await meetingsApi.deleteSpeaker(id);
+      speakers.setData((cur: any) => cur?.filter((s: any) => s.id !== id));
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  }
+
+  const [page, setPage] = useState(1);
+  const pageSize = 5;
+
+  const filteredSystem = systemSpeakers.filter((s) => {
+    if (searchName && !s.name.toLowerCase().includes(searchName.toLowerCase())) return false;
+    if (searchRole && !s.role.toLowerCase().includes(searchRole.toLowerCase())) return false;
+    if (searchOrg && !s.organization.toLowerCase().includes(searchOrg.toLowerCase())) return false;
+    return true;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(filteredSystem.length / pageSize));
+  const pagedSystem = filteredSystem.slice((page - 1) * pageSize, page * pageSize);
+
+  return (
+    <div className="dialog-backdrop" onClick={close}>
+      <div className="speaker-modal-wide" onClick={(e) => e.stopPropagation()}>
+        <div className="speaker-modal-header">
+          <strong>Quản lý người nói</strong>
+          <button type="button" className="close" onClick={close} aria-label="Đóng">✕</button>
+        </div>
+
+        <div className="speaker-modal-grid">
+          {/* Left Column */}
+          <div className="speaker-modal-col left">
+            <h4>Tạo người tham gia mới</h4>
+            <div className="speaker-create-inputs">
+              <label>
+                <span>Tên đầy đủ <b style={{ color: "#ef4444" }}>*</b></span>
+                <input
+                  type="text"
+                  placeholder="Nhập tên người tham gia"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>Chức danh</span>
+                <input
+                  type="text"
+                  placeholder="Nhập chức danh"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>Đơn vị công tác</span>
+                <input
+                  type="text"
+                  placeholder="Nhập đơn vị công tác"
+                  value={organization}
+                  onChange={(e) => setOrganization(e.target.value)}
+                />
+              </label>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+              <button
+                type="button"
+                className="speaker-add-btn"
+                onClick={() => void handleCreateSpeaker()}
+                disabled={!fullName.trim() || loading}
+              >
+                + Thêm người tham gia
+              </button>
+            </div>
+
+            <h4 style={{ marginTop: 20 }}>Thêm người tham gia từ hệ thống</h4>
+            <div className="speaker-search-bar">
+              <input
+                type="text"
+                placeholder="Tên"
+                value={searchName}
+                onChange={(e) => setSearchName(e.target.value)}
+              />
+              <input
+                type="text"
+                placeholder="Chức Danh"
+                value={searchRole}
+                onChange={(e) => setSearchRole(e.target.value)}
+              />
+              <input
+                type="text"
+                placeholder="Đơn vị"
+                value={searchOrg}
+                onChange={(e) => setSearchOrg(e.target.value)}
+              />
+              <button type="button" className="speaker-search-btn">Tìm kiếm</button>
+            </div>
+
+            <div className="speaker-table-wrap">
+              <table className="speaker-table">
+                <thead>
+                  <tr>
+                    <th>Tên</th>
+                    <th>Chức Danh</th>
+                    <th>Đơn vị</th>
+                    <th style={{ textAlign: "right" }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedSystem.map((spk, idx) => (
+                    <tr key={idx}>
+                      <td><strong>{spk.name}</strong></td>
+                      <td>{spk.role || "—"}</td>
+                      <td>{spk.organization || "—"}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <button
+                          type="button"
+                          className="speaker-join-btn"
+                          onClick={() => void handleAddFromSystem(spk)}
+                          disabled={loading}
+                        >
+                          + Thêm vào cuộc họp
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination (Ảnh 5) */}
+            <div className="speaker-pagination">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                title="Trang trước"
+              >
+                &lt;
+              </button>
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  className={page === p ? "active" : ""}
+                  onClick={() => setPage(p)}
+                >
+                  {p}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                title="Trang sau"
+              >
+                &gt;
+              </button>
+            </div>
+          </div>
+
+          {/* Right Column */}
+          <div className="speaker-modal-col right">
+            <h4>Người đã tham gia</h4>
+            <div className="speaker-table-wrap" style={{ minHeight: 380 }}>
+              <table className="speaker-table">
+                <thead>
+                  <tr>
+                    <th>Tên</th>
+                    <th>Chức Danh</th>
+                    <th>Đơn vị</th>
+                    <th style={{ textAlign: "right" }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {currentSpeakers.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} style={{ textAlign: "center", padding: "60px 20px" }}>
+                        <div style={{ color: "var(--muted)", fontSize: 32, marginBottom: 8 }}>📥</div>
+                        <div style={{ color: "var(--muted)", fontSize: 13 }}>No data</div>
+                      </td>
+                    </tr>
+                  ) : (
+                    currentSpeakers.map((spk: any) => (
+                      <tr key={spk.id}>
+                        <td><strong>{spk.name}</strong></td>
+                        <td>{spk.role || "—"}</td>
+                        <td>{spk.organization || "—"}</td>
+                        <td style={{ textAlign: "right" }}>
+                          <button
+                            type="button"
+                            className="speaker-remove-btn"
+                            onClick={() => void handleRemoveSpeaker(spk.id)}
+                          >
+                            Xóa
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div className="speaker-modal-footer">
+          <button type="button" className="btn btn-ghost" onClick={close}>Cancel</button>
+          <button type="button" className="btn btn-primary-blue" onClick={close}>OK</button>
+        </div>
+      </div>
+    </div>
+  );
 }

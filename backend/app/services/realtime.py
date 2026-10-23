@@ -47,28 +47,39 @@ class RealtimeTranscriptService:
     def stream_session_id(self) -> str:
         return self._speaker_scope
 
+    async def _ensure_meeting(self) -> Meeting:
+        if self._meeting not in self._session:
+            refreshed = await self._session.get(Meeting, self._meeting.id)
+            if refreshed is not None:
+                self._meeting = refreshed
+        return self._meeting
+
     async def recording_started(self) -> None:
-        if self._meeting.status in {
+        meeting = await self._ensure_meeting()
+        if meeting.status in {
             MeetingStatus.CREATED,
             MeetingStatus.PROCESSING,
             MeetingStatus.FAILED,
         }:
-            self._meeting.status = MeetingStatus.RECORDING
+            meeting.status = MeetingStatus.RECORDING
             await self._session.commit()
 
     async def recording_ended(self) -> None:
-        if self._meeting.status in {MeetingStatus.RECORDING, MeetingStatus.PROCESSING}:
-            self._meeting.status = MeetingStatus.COMPLETED
+        meeting = await self._ensure_meeting()
+        if meeting.status in {MeetingStatus.RECORDING, MeetingStatus.PROCESSING}:
+            meeting.status = MeetingStatus.COMPLETED
             await self._session.commit()
 
     async def recording_failed(self) -> None:
-        self._meeting.status = MeetingStatus.FAILED
+        meeting = await self._ensure_meeting()
+        meeting.status = MeetingStatus.FAILED
         await self._session.commit()
 
     async def persist_final(self, segment: TranscriptionSegment, turn_order: int | None = None):
         """Persist through the common STT ingestion boundary used by batch workers too."""
+        meeting = await self._ensure_meeting()
         stored = await TranscriptService(self._session).append_stt_final(
-            self._meeting, self._actor_id,
+            meeting, self._actor_id,
             replace(
                 segment, speaker_label=self._scoped_label(segment.speaker_label),
                 start_ms=segment.start_ms + self._time_offset_ms,
@@ -77,7 +88,7 @@ class RealtimeTranscriptService:
             start_new_version=not self._started_stt_version,
         )
         self._started_stt_version = True
-        self._meeting.duration_ms = max(self._meeting.duration_ms or 0, stored.end_ms)
+        meeting.duration_ms = max(meeting.duration_ms or 0, stored.end_ms)
         await self._session.commit()
         if turn_order is not None:
             self._turns[turn_order] = stored.logical_segment_id

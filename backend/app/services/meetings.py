@@ -15,6 +15,39 @@ from app.models.enums import MeetingPermission, MeetingSourceType, MeetingStatus
 from app.models.meeting import Meeting, MeetingMember, ShareLink
 from app.models.user import User
 from app.schemas.auth import UserResponse
+import time
+
+_ACCESS_CACHE: dict[tuple[UUID, UUID], tuple[float, AccessLevel]] = {}
+_ACCESS_CACHE_TTL = 15.0
+
+_MEETINGS_LIST_CACHE: dict[tuple, tuple[float, list[MeetingResponse]]] = {}
+_MEETINGS_LIST_TTL = 15.0
+
+_invalidate_bundle_callback = None
+
+def register_bundle_invalidator(callback):
+    global _invalidate_bundle_callback
+    _invalidate_bundle_callback = callback
+
+def invalidate_user_meetings_cache(user_id: UUID | None = None) -> None:
+    if user_id is None:
+        _MEETINGS_LIST_CACHE.clear()
+    else:
+        to_del = [k for k in _MEETINGS_LIST_CACHE if k[0] == user_id]
+        for k in to_del:
+            _MEETINGS_LIST_CACHE.pop(k, None)
+
+def invalidate_meeting_cache(meeting_id: UUID) -> None:
+    to_delete = [k for k in _ACCESS_CACHE if k[0] == meeting_id]
+    for k in to_delete:
+        _ACCESS_CACHE.pop(k, None)
+    invalidate_user_meetings_cache()
+    if _invalidate_bundle_callback is not None:
+        try:
+            _invalidate_bundle_callback(meeting_id)
+        except Exception:
+            pass
+
 from app.schemas.meeting import (
     AccessLevel,
     MeetingCreateRequest,
@@ -44,6 +77,7 @@ class MeetingService:
         meeting = Meeting(owner_id=owner.id, **payload.model_dump())
         self._session.add(meeting)
         await self._session.commit()
+        invalidate_user_meetings_cache(owner.id)
         await self._session.refresh(meeting)
         return self._meeting_response(meeting, "owner")
 
@@ -51,6 +85,12 @@ class MeetingService:
         self, user: User, *, limit: int = 100, offset: int = 0, query_text: str | None = None,
         status: MeetingStatus | None = None, source_type: MeetingSourceType | None = None,
     ) -> list[MeetingResponse]:
+        cache_key = (user.id, limit, offset, query_text, status.value if status else None, source_type.value if source_type else None)
+        now = time.monotonic()
+        cached = _MEETINGS_LIST_CACHE.get(cache_key)
+        if cached is not None and (now - cached[0]) < _MEETINGS_LIST_TTL:
+            return cached[1]
+
         query = (
             select(Meeting, MeetingMember.permission)
             .outerjoin(
@@ -72,11 +112,13 @@ class MeetingService:
         if source_type is not None:
             query = query.where(Meeting.source_type == source_type)
         rows = (await self._session.execute(query)).all()
-        return [
+        result = [
             self._meeting_response(meeting, "owner" if meeting.owner_id == user.id else permission)
             for meeting, permission in rows
             if permission is not None or meeting.owner_id == user.id
         ]
+        _MEETINGS_LIST_CACHE[cache_key] = (now, result)
+        return result
 
     async def get(self, meeting_id: UUID, user: User) -> MeetingResponse:
         meeting, permission = await self.require_access(meeting_id, user, MeetingPermission.READ)
@@ -89,6 +131,7 @@ class MeetingService:
         for field, value in payload.model_dump(exclude_unset=True).items():
             setattr(meeting, field, value)
         await self._session.commit()
+        invalidate_meeting_cache(meeting_id)
         await self._session.refresh(meeting)
         return self._meeting_response(meeting, permission)
 
@@ -96,6 +139,7 @@ class MeetingService:
         meeting, permission = await self.require_access(meeting_id, user, MeetingPermission.EDIT)
         meeting.status = MeetingStatus.COMPLETED
         await self._session.commit()
+        invalidate_meeting_cache(meeting_id)
         await self._session.refresh(meeting)
         return self._meeting_response(meeting, permission)
 
@@ -104,6 +148,7 @@ class MeetingService:
             meeting, _ = await self.require_access(meeting_id, user, "owner")
         await self._session.delete(meeting)
         await self._session.commit()
+        invalidate_meeting_cache(meeting.id)
 
     async def require_meeting_access(
         self, meeting: Meeting, user: User, required: MeetingPermission | str
@@ -126,7 +171,17 @@ class MeetingService:
         meeting = await self._session.get(Meeting, meeting_id)
         if meeting is None:
             raise ApiError("MEETING_NOT_FOUND", "Meeting was not found.", 404)
-        permission = await self.require_meeting_access(meeting, user, required)
+
+        now = time.monotonic()
+        cached = _ACCESS_CACHE.get((meeting_id, user.id))
+        if cached is not None and (now - cached[0]) < _ACCESS_CACHE_TTL:
+            permission = cached[1]
+        else:
+            permission = await self.require_meeting_access(meeting, user, required)
+            _ACCESS_CACHE[(meeting_id, user.id)] = (now, permission)
+
+        if _PERMISSION_RANK[permission] < _PERMISSION_RANK[required]:
+            raise ApiError("PERMISSION_DENIED", "You do not have permission for this action.", 403)
         return meeting, permission
 
     async def list_members(self, meeting_id: UUID, user: User) -> list[dict[str, object]]:

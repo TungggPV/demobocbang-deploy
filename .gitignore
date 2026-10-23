@@ -19,3 +19,7 @@ speechmatics-test/
 .DS_Store
 Thumbs.db
 .local-media/
+
+*.db
+patch_main_cors.py
+start_offline.bat

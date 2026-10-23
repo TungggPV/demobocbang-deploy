@@ -46,3 +46,10 @@ export interface ShareLink { id: string; token: string; permission: Exclude<Perm
 export interface CreatedShareLink extends ShareLink { share_url: string }
 export interface ExportArtifact { id: string; format: ExportFormat; filename?: string; status: JobStatus; job_id?: string }
 export interface ApiErrorShape { code?: string; message?: string; detail?: string }
+export interface MeetingBundle {
+  meeting: Meeting;
+  transcript: Transcript | null;
+  media: MediaFile[];
+  speakers: Speaker[];
+  translations: Translation[];
+}

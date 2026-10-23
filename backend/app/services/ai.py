@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -51,7 +52,7 @@ class AIService:
             raise ApiError("PROVIDER_CAPABILITY_UNAVAILABLE", "Translation is not configured.", 503)
         if (payload.source_language, payload.target_language) not in self._translation.capabilities().supported_language_pairs:
             raise ApiError("PROVIDER_CAPABILITY_UNAVAILABLE", "This translation language pair is not supported.", 422)
-        version = await self._valid_current_transcript(meeting.current_transcript_version_id)
+        version = await self._valid_current_transcript(meeting.current_transcript_version_id, meeting_id=meeting.id)
         job = Job(
             meeting_id=meeting.id,
             job_type="translation",
@@ -68,7 +69,7 @@ class AIService:
         meeting, _ = await self._meetings.require_access(meeting_id, user, MeetingPermission.EDIT)
         if self._llm is None or not self._llm.capabilities().structured_output:
             raise ApiError("PROVIDER_CAPABILITY_UNAVAILABLE", "AI summary generation is not configured.", 503)
-        version = await self._valid_current_transcript(meeting.current_transcript_version_id)
+        version = await self._valid_current_transcript(meeting.current_transcript_version_id, meeting_id=meeting.id)
         job = Job(
             meeting_id=meeting.id,
             job_type="summary",
@@ -83,8 +84,13 @@ class AIService:
 
     async def list_translations(self, meeting_id: UUID, user: User) -> list[TranslationResponse]:
         await self._meetings.require_access(meeting_id, user, MeetingPermission.READ)
-        translations = await self._session.scalars(select(Translation).where(Translation.meeting_id == meeting_id).order_by(Translation.created_at.desc()))
-        return [await self._translation_response(item) for item in translations]
+        translations = (await self._session.scalars(
+            select(Translation)
+            .where(Translation.meeting_id == meeting_id)
+            .options(selectinload(Translation.segments))
+            .order_by(Translation.created_at.desc())
+        )).all()
+        return [self._translation_response_sync(item) for item in translations]
 
     async def translation(self, translation_id: UUID, user: User) -> TranslationResponse:
         translation = await self._session.get(Translation, translation_id)
@@ -95,8 +101,28 @@ class AIService:
 
     async def list_summaries(self, meeting_id: UUID, user: User) -> list[SummaryResponse]:
         await self._meetings.require_access(meeting_id, user, MeetingPermission.READ)
-        summaries = await self._session.scalars(select(Summary).where(Summary.meeting_id == meeting_id).order_by(Summary.created_at.desc()))
-        return [await self._summary_response(item) for item in summaries]
+        summaries = (await self._session.scalars(
+            select(Summary)
+            .where(Summary.meeting_id == meeting_id)
+            .options(selectinload(Summary.versions))
+            .order_by(Summary.created_at.desc())
+        )).all()
+        responses: list[SummaryResponse] = []
+        for item in summaries:
+            if not item.versions:
+                continue
+            latest = max(item.versions, key=lambda v: v.version_no)
+            responses.append(
+                SummaryResponse(
+                    id=item.id,
+                    meeting_id=item.meeting_id,
+                    transcript_version_id=item.transcript_version_id,
+                    template=item.template_type,
+                    output_language=item.output_language,
+                    current_version=self._summary_version_response(latest),
+                )
+            )
+        return responses
 
     async def summary(self, summary_id: UUID, user: User) -> SummaryResponse:
         summary = await self._session.get(Summary, summary_id)
@@ -117,13 +143,43 @@ class AIService:
             raise ApiError("SUMMARY_VERSION_NOT_FOUND", "Summary version was not found.", 404)
         return self._summary_version_response(version)
 
-    async def _valid_current_transcript(self, version_id: UUID | None) -> TranscriptVersion:
+    async def _valid_current_transcript(self, version_id: UUID | None, meeting_id: UUID | None = None) -> TranscriptVersion:
+        if version_id is None and meeting_id is not None:
+            from app.models.transcript import Transcript
+            transcript = await self._session.scalar(select(Transcript).where(Transcript.meeting_id == meeting_id))
+            if transcript:
+                latest_v = await self._session.scalar(
+                    select(TranscriptVersion)
+                    .where(TranscriptVersion.transcript_id == transcript.id)
+                    .order_by(TranscriptVersion.version_no.desc())
+                    .limit(1)
+                )
+                if latest_v:
+                    version_id = latest_v.id
         if version_id is None:
             raise ApiError("TRANSCRIPT_NOT_FOUND", "A transcript is required for this operation.", 422)
         version = await self._session.get(TranscriptVersion, version_id)
-        if version is None or not await self._segments(version.id):
+        if version is None:
+            raise ApiError("TRANSCRIPT_INVALID", "Transcript input is empty or invalid.", 422)
+        segments = await self._segments(version.id)
+        if not segments:
             raise ApiError("TRANSCRIPT_INVALID", "Transcript input is empty or invalid.", 422)
         return version
+
+    def _translation_response_sync(self, translation: Translation) -> TranslationResponse:
+        segments = sorted(translation.segments, key=lambda s: s.sequence) if translation.segments else []
+        return TranslationResponse(
+            id=translation.id,
+            meeting_id=translation.meeting_id,
+            transcript_version_id=translation.transcript_version_id,
+            source_language=translation.source_language,
+            target_language=translation.target_language,
+            created_at=translation.created_at,
+            segments=[
+                TranslationSegmentResponse(logical_segment_id=item.logical_segment_id, sequence=item.sequence, text=item.text)
+                for item in segments
+            ],
+        )
 
     async def _translation_response(self, translation: Translation) -> TranslationResponse:
         segments = await self._session.scalars(select(TranslationSegment).where(TranslationSegment.translation_id == translation.id).order_by(TranslationSegment.sequence))
@@ -144,9 +200,44 @@ class AIService:
 
     async def _segments(self, version_id: UUID) -> list[SegmentVersion]:
         segments = list(await self._session.scalars(select(SegmentVersion).where(SegmentVersion.transcript_version_id == version_id).order_by(SegmentVersion.sequence)))
-        if any(not item.text.strip() or item.start_ms >= item.end_ms for item in segments):
-            return []
-        return segments
+        if not segments:
+            version = await self._session.get(TranscriptVersion, version_id)
+            if version:
+                from datetime import datetime, UTC
+                from app.models.transcript import CurrentSegment
+                rows = list(await self._session.scalars(
+                    select(CurrentSegment)
+                    .where(CurrentSegment.transcript_id == version.transcript_id)
+                    .order_by(CurrentSegment.position, CurrentSegment.logical_segment_id)
+                ))
+                if rows:
+                    for sequence, item in enumerate(rows, start=1):
+                        self._session.add(SegmentVersion(
+                            transcript_version_id=version.id,
+                            logical_segment_id=item.logical_segment_id,
+                            speaker_id=item.speaker_id,
+                            sequence=sequence,
+                            start_ms=item.start_ms,
+                            end_ms=item.end_ms,
+                            text=item.text,
+                            original_stt_text=item.original_stt_text,
+                            confidence=item.confidence,
+                        ))
+                    version.checkpointed_at = datetime.now(UTC)
+                    await self._session.flush()
+                    segments = list(await self._session.scalars(
+                        select(SegmentVersion)
+                        .where(SegmentVersion.transcript_version_id == version_id)
+                        .order_by(SegmentVersion.sequence)
+                    ))
+        valid: list[SegmentVersion] = []
+        for s in segments:
+            if not s.text or not s.text.strip():
+                continue
+            if s.start_ms >= s.end_ms:
+                s.end_ms = s.start_ms + 1000
+            valid.append(s)
+        return valid
 
     @staticmethod
     def _summary_version_response(version: SummaryVersion) -> SummaryVersionResponse:
@@ -240,9 +331,46 @@ class AIJobDispatcher:
 
 async def _valid_segments(session: AsyncSession, version_id: UUID) -> list[SegmentVersion]:
     segments = list(await session.scalars(select(SegmentVersion).where(SegmentVersion.transcript_version_id == version_id).order_by(SegmentVersion.sequence)))
-    if not segments or any(not item.text.strip() or item.start_ms >= item.end_ms for item in segments):
+    if not segments:
+        version = await session.get(TranscriptVersion, version_id)
+        if version:
+            from datetime import datetime, UTC
+            from app.models.transcript import CurrentSegment
+            rows = list(await session.scalars(
+                select(CurrentSegment)
+                .where(CurrentSegment.transcript_id == version.transcript_id)
+                .order_by(CurrentSegment.position, CurrentSegment.logical_segment_id)
+            ))
+            if rows:
+                for sequence, item in enumerate(rows, start=1):
+                    session.add(SegmentVersion(
+                        transcript_version_id=version.id,
+                        logical_segment_id=item.logical_segment_id,
+                        speaker_id=item.speaker_id,
+                        sequence=sequence,
+                        start_ms=item.start_ms,
+                        end_ms=item.end_ms,
+                        text=item.text,
+                        original_stt_text=item.original_stt_text,
+                        confidence=item.confidence,
+                    ))
+                version.checkpointed_at = datetime.now(UTC)
+                await session.flush()
+                segments = list(await session.scalars(
+                    select(SegmentVersion)
+                    .where(SegmentVersion.transcript_version_id == version_id)
+                    .order_by(SegmentVersion.sequence)
+                ))
+    valid: list[SegmentVersion] = []
+    for s in segments:
+        if not s.text or not s.text.strip():
+            continue
+        if s.start_ms >= s.end_ms:
+            s.end_ms = s.start_ms + 1000
+        valid.append(s)
+    if not valid:
         raise ValueError("Transcript input is empty or invalid.")
-    return segments
+    return valid
 
 
 def _normalize_summary(value: dict[str, object]) -> dict[str, object]:

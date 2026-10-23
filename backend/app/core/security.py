@@ -105,11 +105,11 @@ class TokenService:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             raise ApiError("AUTH_REQUIRED", "Authentication is required.", 401) from None
 
-    def issue_oauth_state(self) -> str:
-        return self._issue(UUID(int=0), "google_oauth_state", 600)
+    def issue_oauth_state(self, extra: dict[str, str] | None = None) -> str:
+        return self._issue(UUID(int=0), "google_oauth_state", 600, extra=extra)
 
-    def verify_oauth_state(self, state: str) -> None:
-        self.verify(state, "google_oauth_state")
+    def verify_oauth_state(self, state: str) -> dict[str, Any]:
+        return self._verify_payload(state, "google_oauth_state")
 
     def _issue(self, user_id: UUID, kind: str, ttl_seconds: int, extra: dict[str, str] | None = None) -> str:
         if self._secret is None:

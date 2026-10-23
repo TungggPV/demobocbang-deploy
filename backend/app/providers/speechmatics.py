@@ -535,7 +535,8 @@ class SpeechmaticsStream:
             self._finalized_end_ms[identity] = max(
                 segment.end_ms, self._finalized_end_ms.get(identity, -1),
             )
-        self._turns.remove(turn)
+        if turn in self._turns:
+            self._turns.remove(turn)
         if self._active_turn is turn:
             self._active_turn = None
 

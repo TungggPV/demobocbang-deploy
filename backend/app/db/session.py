@@ -1,3 +1,4 @@
+import asyncio
 """Async SQLAlchemy connection and session lifecycle."""
 
 from collections.abc import AsyncIterator
@@ -23,14 +24,46 @@ class Database:
         query_timing_enabled: bool = False,
         slow_query_ms: float = 100.0,
     ) -> None:
-        self._engine: AsyncEngine | None = (
-            create_async_engine(database_url, pool_pre_ping=True) if database_url else None
-        )
+        if database_url:
+            if database_url.startswith("sqlite"):
+                self._engine: AsyncEngine | None = create_async_engine(
+                    database_url,
+                )
+            else:
+                connect_args = {
+                    "statement_cache_size": 0,
+                    "prepared_statement_cache_size": 0,
+                    "command_timeout": 30,
+                }
+                self._engine: AsyncEngine | None = create_async_engine(
+                    database_url,
+                    pool_size=25,
+                    max_overflow=25,
+                    pool_timeout=30,
+                    pool_recycle=120,
+                    pool_pre_ping=True,
+                    connect_args=connect_args,
+                )
+        else:
+            self._engine = None
+
         if self._engine is not None and query_timing_enabled:
             self._install_query_timing(self._engine, slow_query_ms)
         self._session_factory = (
             async_sessionmaker(self._engine, expire_on_commit=False) if self._engine else None
         )
+
+    async def prewarm(self, count: int = 6) -> None:
+        """Pre-warm connections in parallel so user requests don't suffer the 4s TLS handshake."""
+        if self._engine is None:
+            return
+        async def _connect():
+            try:
+                async with self.session() as s:
+                    await s.execute(text("SELECT 1"))
+            except Exception:
+                pass
+        await asyncio.gather(*[_connect() for _ in range(count)])
 
     @property
     def is_configured(self) -> bool:

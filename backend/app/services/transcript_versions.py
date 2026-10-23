@@ -130,6 +130,16 @@ class TranscriptVersionReader:
             by_id[created["logical_segment_id"]] = created
         elif event.event_type == "segments_merged":
             first = by_id[UUID(str(payload["first_logical_segment_id"]))]
-            second = by_id.pop(UUID(str(payload["second_logical_segment_id"])))
+            merged_ids = payload.get("merged_segment_ids")
+            if merged_ids and isinstance(merged_ids, list) and len(merged_ids) > 1:
+                for mid in merged_ids[1:]:
+                    uid = UUID(str(mid))
+                    if uid in by_id:
+                        sec = by_id.pop(uid)
+                        if sec in state:
+                            state.remove(sec)
+            elif "second_logical_segment_id" in payload:
+                second = by_id.pop(UUID(str(payload["second_logical_segment_id"])))
+                if second in state:
+                    state.remove(second)
             first["end_ms"], first["text"] = payload["end_ms"], payload["text"]
-            state.remove(second)

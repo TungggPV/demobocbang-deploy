@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { meetingsApi, voiceProfilesApi } from "../api/endpoints";
+import { meetingsApi } from "../api/endpoints";
 import { useAsync } from "../hooks/useAsync";
 import { can } from "../utils/permissions";
-import { Button, Empty, Failure, Icon, Loading, PageHeading, Panel } from "../components/ui";
-import type { VoiceProfile } from "../types/domain";
+import { Button, Empty, Failure, Icon, Loading, PageHeading } from "../components/ui";
 
 type SpeakerView = {
   id: string;
@@ -12,19 +11,16 @@ type SpeakerView = {
   role?: string;
   organization?: string;
   is_identified: boolean;
-  voice_profile_id?: string;
 };
 
 export function SpeakersPage({ meetingId }: { meetingId: string }) {
   const meeting = useAsync(() => meetingsApi.get(meetingId), [meetingId]);
   const speakers = useAsync(() => meetingsApi.speakers(meetingId), [meetingId]);
-  const globalProfiles = useAsync(() => voiceProfilesApi.list(), []);
 
   const [draft, setDraft] = useState({
     name: "",
     role: "",
     organization: "",
-    voice_profile_id: "",
   });
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -42,21 +38,6 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
 
   const editable = can(meeting.data.permission, "edit");
 
-  function selectGlobalProfile(profileId: string) {
-    if (!profileId) {
-      setDraft((cur) => ({ ...cur, voice_profile_id: "" }));
-      return;
-    }
-    const found = globalProfiles.data?.find((p) => p.id === profileId);
-    if (found) {
-      setDraft((cur) => ({
-        ...cur,
-        name: found.name,
-        voice_profile_id: found.id,
-      }));
-    }
-  }
-
   async function create(event: React.FormEvent) {
     event.preventDefault();
     if (!draft.name.trim()) return;
@@ -66,10 +47,9 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
         name: draft.name.trim(),
         role: draft.role.trim() || undefined,
         organization: draft.organization.trim() || undefined,
-        voice_profile_id: draft.voice_profile_id || undefined,
       });
       speakers.setData((items) => [...(items ?? []), item]);
-      setDraft({ name: "", role: "", organization: "", voice_profile_id: "" });
+      setDraft({ name: "", role: "", organization: "" });
       setError("");
       setCreateModalOpen(false);
     } catch (cause) {
@@ -94,7 +74,7 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
       <PageHeading
         title="Người nói"
         context={meeting.data.title}
-        description="Danh sách người nói được thiết lập riêng cho cuộc họp này. Các mẫu giọng dùng chung đã lưu sẽ được tự động nhận diện cho cuộc họp; bạn có thể tùy chỉnh tên, vai trò và đơn vị tại đây mà không ảnh hưởng mẫu giọng gốc."
+        description="Danh sách người tham gia cuộc họp. Bạn có thể chỉnh sửa tên, vai trò và đơn vị đại diện."
         actions={
           editable ? (
             <Button
@@ -130,7 +110,7 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
           {speakers.data && !speakers.data.length && (
             <Empty
               title="Chưa có người nói"
-              detail="Người nói sẽ được tự động nhận diện từ mẫu giọng hoặc diarization khi ghi âm/tải tệp, hoặc bạn có thể thêm người nói thủ công."
+              detail="Người nói sẽ được tự động nhận diện khi ghi âm hoặc tải tệp âm thanh, hoặc bạn có thể thêm người nói thủ công."
               action={
                 editable ? (
                   <Button
@@ -164,34 +144,9 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
             </button>
             <h2>Thêm người nói</h2>
             <p className="muted" style={{ margin: "4px 0 16px" }}>
-              Thêm người tham gia riêng cho cuộc họp này.
+              Thêm người tham gia cho cuộc họp này.
             </p>
             <form onSubmit={create}>
-              {globalProfiles.data && globalProfiles.data.length > 0 && (
-                <label className="field">
-                  <span>Chọn từ mẫu giọng dùng chung</span>
-                  <select
-                    value={draft.voice_profile_id}
-                    onChange={(e) => selectGlobalProfile(e.target.value)}
-                    style={{
-                      width: "100%",
-                      padding: "8px 10px",
-                      borderRadius: 6,
-                      border: "1px solid var(--border)",
-                      fontSize: 14,
-                      background: "var(--surface)",
-                    }}
-                  >
-                    <option value="">-- Nhập thủ công hoặc chọn mẫu giọng --</option>
-                    {globalProfiles.data.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} ({p.sample_count} lần thu)
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-
               <label className="field">
                 Tên *
                 <input
@@ -259,9 +214,7 @@ export function SpeakersPage({ meetingId }: { meetingId: string }) {
               Xác nhận xóa người nói
             </h3>
             <p style={{ margin: "0 0 20px", fontSize: 14, color: "#64748b", lineHeight: 1.5 }}>
-              Bạn có chắc chắn muốn xóa người nói{" "}
-              <strong>"{deletingSpeaker.name}"</strong> khỏi cuộc họp này? Thao tác này
-              không làm ảnh hưởng đến mẫu giọng gốc.
+              Bạn có chắc chắn muốn xóa người nói <strong>"{deletingSpeaker.name}"</strong> khỏi cuộc họp này?
             </p>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
               <Button tone="ghost" onClick={() => setDeletingSpeaker(null)}>
@@ -356,9 +309,7 @@ function SpeakerCard({
     <article className="speaker-card">
       <div className="speaker-card-top">
         <div className="speaker-avatar">{speaker.name.slice(0, 2).toUpperCase()}</div>
-        <small className={speaker.is_identified ? "speaker-state identified" : "speaker-state"}>
-          {speaker.is_identified ? "✓ Nhận diện từ mẫu giọng" : "Người nói cuộc họp"}
-        </small>
+        <small className="speaker-state">Người nói cuộc họp</small>
       </div>
       {editing ? (
         <div className="speaker-card-form">

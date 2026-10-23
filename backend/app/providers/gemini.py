@@ -55,6 +55,20 @@ class GeminiTranslationProvider(_GeminiBase):
         return TranslationCapabilities(frozenset({("vi", "en"), ("en", "vi")}))
 
     async def translate_segments(self, segments: tuple[TranscriptionSegment, ...], source: str, target: str) -> tuple[TranscriptionSegment, ...]:
+        if not segments:
+            return ()
+        batch_size = 35
+        if len(segments) <= batch_size:
+            return await self._translate_batch(segments, source, target)
+
+        results: list[TranscriptionSegment] = []
+        for i in range(0, len(segments), batch_size):
+            chunk = segments[i : i + batch_size]
+            translated_chunk = await self._translate_batch(chunk, source, target)
+            results.extend(translated_chunk)
+        return tuple(results)
+
+    async def _translate_batch(self, segments: tuple[TranscriptionSegment, ...], source: str, target: str) -> tuple[TranscriptionSegment, ...]:
         schema: dict[str, object] = {"type": "object", "properties": {"translations": {"type": "array", "items": {"type": "string"}}}, "required": ["translations"]}
         prompt = f"Translate every transcript segment from {source} to {target}. Preserve order, meaning, names, numbers, and do not merge or omit segments. Return JSON only. Segments:\n" + json.dumps([item.text for item in segments], ensure_ascii=False)
         try:

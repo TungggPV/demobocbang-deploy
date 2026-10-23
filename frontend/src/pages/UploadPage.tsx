@@ -6,6 +6,7 @@ import { useAsync } from "../hooks/useAsync";
 import { useJobMonitor } from "../state/useJobMonitor";
 import { can } from "../utils/permissions";
 import { Button, Empty, Failure, Loading, PageHeading, Status } from "../components/ui";
+import { navigate } from "../app/router";
 
 const accepted = ["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "webm", "mp4", "mov", "mkv", "avi", "mpeg", "mpg"];
 
@@ -18,7 +19,7 @@ export function UploadPage({ meetingId }: { meetingId: string }) {
   const jobMonitor = useJobMonitor();
 
   useEffect(() => {
-    if (jobMonitor.job?.status === "completed") window.setTimeout(() => window.location.assign(`/meetings/${meetingId}`), 500);
+    if (jobMonitor.job?.status === "completed") window.setTimeout(() => navigate(`/meetings/${meetingId}`), 500);
   }, [jobMonitor.job?.status, meetingId]);
 
   function choose(next?: File) {

@@ -11,7 +11,11 @@ from app.api.v1.routes.auth import CurrentUserDependency
 from app.api.v1.routes.media import MediaServiceDependency
 from app.api.v1.routes.exports import ExportServiceDependency
 from app.core.dependencies import DatabaseSessionDependency
+from app.schemas.transcript import TranscriptResponse
+from app.api.v1.routes.transcripts import TranscriptServiceDependency
+from app.api.v1.routes.ai import AIServiceDependency
 from app.schemas.meeting import (
+    MeetingBundleResponse,
     MeetingCreateRequest,
     MeetingMemberCreateRequest,
     MeetingMemberResponse,
@@ -24,7 +28,19 @@ from app.schemas.meeting import (
     ShareLinkUpdateRequest,
 )
 from app.models.enums import MeetingSourceType, MeetingStatus
-from app.services.meetings import MeetingService
+from app.services.meetings import MeetingService, register_bundle_invalidator
+import time
+
+_BUNDLE_CACHE: dict[UUID, tuple[float, MeetingBundleResponse]] = {}
+_BUNDLE_CACHE_TTL = 15.0
+
+def invalidate_bundle_cache(meeting_id: UUID | None = None) -> None:
+    if meeting_id is None:
+        _BUNDLE_CACHE.clear()
+    else:
+        _BUNDLE_CACHE.pop(meeting_id, None)
+
+register_bundle_invalidator(invalidate_bundle_cache)
 
 router = APIRouter(prefix="/meetings")
 
@@ -63,6 +79,55 @@ async def get_meeting(
     meeting_id: UUID, user: CurrentUserDependency, service: MeetingServiceDependency
 ) -> MeetingResponse:
     return await service.get(meeting_id, user)
+
+
+@router.get("/{meeting_id}/bundle", response_model=MeetingBundleResponse)
+async def get_meeting_bundle(
+    meeting_id: UUID,
+    user: CurrentUserDependency,
+    service: MeetingServiceDependency,
+    transcript_service: TranscriptServiceDependency,
+    media_service: MediaServiceDependency,
+    ai_service: AIServiceDependency,
+) -> MeetingBundleResponse:
+    now = time.monotonic()
+    cached = _BUNDLE_CACHE.get(meeting_id)
+    if cached is not None and (now - cached[0]) < _BUNDLE_CACHE_TTL:
+        await service.require_access(meeting_id, user, "read")
+        return cached[1]
+
+    meeting, permission = await service.require_access(meeting_id, user, "read")
+    meeting_res = service._meeting_response(meeting, permission)
+
+    try:
+        transcript_res = await transcript_service.current(meeting_id, user)
+    except Exception:
+        transcript_res = None
+
+    try:
+        media_res = await media_service.list_media(meeting_id, user)
+    except Exception:
+        media_res = []
+
+    try:
+        speakers_res = await transcript_service.list_speakers(meeting_id, user)
+    except Exception:
+        speakers_res = []
+
+    try:
+        translations_res = await ai_service.list_translations(meeting_id, user)
+    except Exception:
+        translations_res = []
+
+    bundle = MeetingBundleResponse(
+        meeting=meeting_res,
+        transcript=transcript_res,
+        media=media_res,
+        speakers=speakers_res,
+        translations=translations_res,
+    )
+    _BUNDLE_CACHE[meeting_id] = (now, bundle)
+    return bundle
 
 
 @router.patch("/{meeting_id}", response_model=MeetingResponse)

@@ -10,7 +10,7 @@ function preferredTheme(): Theme {
   if (documentTheme === "light" || documentTheme === "dark") return documentTheme;
   const savedTheme = window.localStorage.getItem(STORAGE_KEY);
   if (savedTheme === "light" || savedTheme === "dark") return savedTheme;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  return "dark";
 }
 
 function applyTheme(theme: Theme) {

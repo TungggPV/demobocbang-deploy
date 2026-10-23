@@ -420,13 +420,14 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
         pass
     except ApiError as exc:
         await _error_and_close(websocket, send_json, exc.code, exc.message, retryable=False)
-    except Exception:
+    except Exception as exc:
+        logger.exception("realtime_endpoint_unhandled_exception: %s", exc)
         await _error_and_close(
             websocket,
             send_json,
             "INTERNAL_SERVER_ERROR",
-            "Realtime transcription could not continue.",
-            False,
+            "Realtime transcription could not continue: " + str(exc),
+            True,
         )
     finally:
         with CancelScope(shield=True):
@@ -492,10 +493,16 @@ async def _receive_with_events(
                 (message_task, event_task), return_when=asyncio.FIRST_COMPLETED
             )
             if event_task in done:
-                await _emit_events(
-                    send_json, transcript_service, event_task.result(),
-                    translation_session=translation_session,
-                )
+                try:
+                    events = event_task.result()
+                    await _emit_events(
+                        send_json, transcript_service, events,
+                        translation_session=translation_session,
+                    )
+                except STTProviderError:
+                    raise
+                except Exception as emit_err:
+                    logger.warning("realtime_emit_events_failed: %s", emit_err, exc_info=True)
             if message_task in done:
                 return message_task.result()
     finally:

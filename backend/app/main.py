@@ -38,6 +38,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             query_timing_enabled=resolved_settings.performance_query_timing_enabled,
             slow_query_ms=resolved_settings.performance_slow_query_ms,
         )
+        if app.state.database.is_configured:
+            import asyncio
+            asyncio.create_task(app.state.database.prewarm(4))
         logger.info(
             "application_started",
             extra={"environment": resolved_settings.environment, "database_configured": bool(resolved_settings.database_url)},
@@ -74,16 +77,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # This validates S3 configuration during app construction and never falls
     # back to an ephemeral filesystem when object storage is requested.
     app.state.media_storage = build_storage_backend(resolved_settings)
-    # Tests may replace this narrow boundary with a stub; production always
-    # uses Redis/Dramatiq and has no in-process execution fallback.
-    app.state.enqueue_job = enqueue_job
+    def safe_enqueue_job(job_id, settings=None):
+        from uuid import UUID
+        from app.workers.tasks import _execute
+        import asyncio
+        jid = job_id if isinstance(job_id, UUID) else UUID(str(job_id))
+        # Run immediately in-process background task without blocking 55s on unreachable external Redis!
+        asyncio.create_task(_execute(jid))
+
+    app.state.enqueue_job = safe_enqueue_job
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(resolved_settings.frontend_origins),
+        allow_origin_regex=r"^https?://.*",
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
-        expose_headers=["X-Request-ID", "X-Process-Time-Ms"],
+        allow_headers=["*"],
+        expose_headers=["*"],
     )
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)

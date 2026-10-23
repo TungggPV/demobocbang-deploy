@@ -5,6 +5,7 @@ import { useAsync } from "../hooks/useAsync";
 import { Button, Failure, Loading, statusLabel } from "../components/ui";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { languageLabel } from "../utils/language";
+import { navigate } from "../app/router";
 
 /** Public links intentionally expose only the data returned by the capability-link API. */
 export function SharePage({ token }: { token: string }) {
@@ -38,7 +39,7 @@ export function SharePage({ token }: { token: string }) {
       setOpening(true);
       setError("");
       const redeemed = await sharesApi.redeem(token);
-      window.location.assign(`/meetings/${redeemed.id}`);
+      navigate(`/meetings/${redeemed.id}`);
     } catch (cause) {
       setError((cause as Error).message);
       setOpening(false);

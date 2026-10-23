@@ -38,7 +38,7 @@ from app.schemas.transcript import (
     TranscriptResponse,
     TranscriptVersionResponse,
 )
-from app.services.meetings import MeetingService
+from app.services.meetings import MeetingService, invalidate_meeting_cache
 from app.services.transcript_versions import TranscriptVersionReader
 
 
@@ -52,8 +52,17 @@ class TranscriptService:
         cursor: str | None = None,
     ) -> TranscriptResponse:
         meeting, _ = await self._meetings.require_access(meeting_id, user, MeetingPermission.READ)
-        version = await self._current_version(meeting)
-        transcript = await self._transcript_for_meeting(meeting.id)
+        stmt = (
+            select(Transcript, TranscriptVersion)
+            .outerjoin(TranscriptVersion, TranscriptVersion.id == meeting.current_transcript_version_id)
+            .where(Transcript.meeting_id == meeting.id)
+        )
+        row = (await self._session.execute(stmt)).first()
+        if row is None or row[0] is None:
+            raise ApiError("TRANSCRIPT_NOT_FOUND", "No transcript exists for this meeting.", 404)
+        transcript, version = row[0], row[1]
+        if version is None:
+            raise ApiError("TRANSCRIPT_NOT_FOUND", "No transcript exists for this meeting.", 404)
         if transcript.current_projection_initialized_at is not None:
             return await self._current_projection_response(meeting, transcript, version, limit, cursor)
         return await self._transcript_response_async(meeting, version, limit=limit, offset=offset)
@@ -278,7 +287,13 @@ class TranscriptService:
         """Shared ingestion boundary for realtime and future upload/batch STT."""
         if not segment.text.strip() or segment.start_ms < 0 or segment.end_ms <= segment.start_ms:
             raise ValueError("Final transcript result is invalid.")
-        await self._session.refresh(meeting, with_for_update=True)
+        if meeting in self._session:
+            await self._session.refresh(meeting, with_for_update=True)
+        else:
+            refreshed = await self._session.get(Meeting, meeting.id, with_for_update=True)
+            if refreshed is None:
+                raise ValueError("Meeting not found.")
+            meeting = refreshed
         transcript = await self._ensure_transcript(meeting.id)
         version = await self._session.scalar(
             select(TranscriptVersion)
@@ -541,6 +556,7 @@ class TranscriptService:
             await self._checkpoint(transcript, version)
         meeting.current_transcript_version_id = version.id
         await self._session.commit()
+        invalidate_meeting_cache(meeting.id)
         return TranscriptMutationResponse(version_id=version.id, version_no=version.version_no, segment=self._current_segment_response(segment) if segment else None)
 
     async def _checkpoint(self, transcript: Transcript, version: TranscriptVersion) -> None:

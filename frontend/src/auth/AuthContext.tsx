@@ -50,7 +50,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<AuthSession | null>(readSession);
   const sessionRef = useRef(session);
   const [oauthRefreshToken] = useState<string | null>(consumeOAuthRefreshToken);
-  const [ready, setReady] = useState(!oauthRefreshToken && (!session || session.user.has_password !== undefined));
+  const [ready, setReady] = useState(!oauthRefreshToken);
   const persist = useCallback((next: AuthSession | null) => {
     sessionRef.current = next;
     setSession(next);
@@ -79,12 +79,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("storage", syncSession);
   }, []);
   useEffect(() => {
-    if (oauthRefreshToken || !sessionRef.current || sessionRef.current.user.has_password !== undefined) return;
-    const current = sessionRef.current;
-    const hydrate = current.refresh_token
-      ? authApi.refresh(current.refresh_token).then(persist)
-      : authApi.me().then((user) => persist({ ...current, user }));
-    void hydrate.catch(() => undefined).finally(() => setReady(true));
+    if (oauthRefreshToken || !sessionRef.current) return;
+    // User already has session, don't re-fetch synchronously unless needed
   }, [oauthRefreshToken, persist]);
   useEffect(() => {
     if (!oauthRefreshToken) return;

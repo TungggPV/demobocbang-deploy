@@ -164,3 +164,16 @@ class ShareLinkCreatedResponse(ShareLinkResponse):
     """The raw token is deliberately returned once, at creation only."""
 
     token: str
+
+
+from app.schemas.transcript import SpeakerResponse, TranscriptResponse
+from app.schemas.media import MediaFileResponse
+from app.schemas.ai import TranslationResponse
+
+
+class MeetingBundleResponse(BaseModel):
+    meeting: MeetingResponse
+    transcript: TranscriptResponse | None = None
+    media: list[MediaFileResponse]
+    speakers: list[SpeakerResponse]
+    translations: list[TranslationResponse]

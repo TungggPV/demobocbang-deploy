@@ -26,6 +26,15 @@ export class MicrophonePcmCapture {
   }
 
   static async open(onChunk: PcmChunkHandler): Promise<MicrophonePcmCapture> {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      if (typeof window !== "undefined" && !window.isSecureContext) {
+        throw new Error(
+          "Trình duyệt chặn Micro vì trang web không bảo mật (HTTP qua IP mạng WiFi). Vui lòng dùng https:// hoặc cấu hình chrome://flags."
+        );
+      }
+      throw new Error("Trình duyệt không hỗ trợ microphone hoặc thiết bị không có micro.");
+    }
+
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: { ideal: 1 },

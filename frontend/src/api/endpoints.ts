@@ -1,6 +1,6 @@
 import { config } from "../app/config";
 import { apiClient } from "./client";
-import type { AuthSession, Capabilities, Comment, CreatedShareLink, ExportArtifact, ExportFormat, Job, Meeting, MeetingStatus, MediaFile, Permission, Segment, ShareLink, Speaker, SpeakerSample, Summary, SummaryLanguage, SummaryTemplate, Transcript, Translation, User, VoiceProfile } from "../types/domain";
+import type { AuthSession, Capabilities, Comment, CreatedShareLink, ExportArtifact, ExportFormat, Job, Meeting, MeetingBundle, MeetingStatus, MediaFile, Permission, Segment, ShareLink, Speaker, SpeakerSample, Summary, SummaryLanguage, SummaryTemplate, Transcript, Translation, User, VoiceProfile } from "../types/domain";
 
 type Page = { limit?: number; offset?: number; q?: string; status?: MeetingStatus; source_type?: Meeting["source_type"] };
 export type TranscriptMutation = { version_id: string; version_no: number; segment?: Segment };
@@ -29,34 +29,108 @@ export const authApi = {
   googleUrl: () => "/auth/google/start",
 };
 
+const bundleCache = new Map<string, { data: MeetingBundle; timestamp: number }>();
+const BUNDLE_CACHE_TTL = 30_000;
+
+let listCache: { key: string; data: Meeting[]; timestamp: number } | null = null;
+const LIST_CACHE_TTL = 15_000;
+
 export const meetingsApi = {
-  list: (page?: Page, signal?: AbortSignal) => apiClient.get<Meeting[]>(`/meetings${pageQuery(page)}`, { signal }),
+  invalidateBundle: (id?: string) => {
+    if (id) bundleCache.delete(id);
+    else bundleCache.clear();
+  },
+  invalidateList: () => {
+    listCache = null;
+  },
+  list: async (page?: Page, signal?: AbortSignal, forceFresh = false) => {
+    const key = pageQuery(page);
+    const now = Date.now();
+    if (!forceFresh && !signal && listCache && listCache.key === key && now - listCache.timestamp < LIST_CACHE_TTL) {
+      return listCache.data;
+    }
+    const data = await apiClient.get<Meeting[]>(`/meetings${key}`, { signal });
+    if (!signal) {
+      listCache = { key, data, timestamp: Date.now() };
+    }
+    return data;
+  },
+  bundle: async (id: string, forceFresh = false) => {
+    const cached = bundleCache.get(id);
+    const now = Date.now();
+    if (!forceFresh && cached && now - cached.timestamp < BUNDLE_CACHE_TTL) {
+      return cached.data;
+    }
+    const data = await apiClient.get<MeetingBundle>(`/meetings/${id}/bundle`);
+    bundleCache.set(id, { data, timestamp: Date.now() });
+    return data;
+  },
   get: (id: string) => apiClient.get<Meeting>(`/meetings/${id}`),
-  create: (body: Pick<Meeting, "title" | "description" | "source_type" | "language_mode" | "diarization_enabled">) => apiClient.post<Meeting>("/meetings", body),
-  update: (id: string, body: Partial<Pick<Meeting, "title" | "description" | "language_mode" | "diarization_enabled">>) => apiClient.patch<Meeting>(`/meetings/${id}`, body),
-  complete: (id: string) => apiClient.post<Meeting>(`/meetings/${id}/complete`),
-  remove: (id: string) => apiClient.delete<void>(`/meetings/${id}`),
-  uploadMedia: (id: string, file: File) => { const data = new FormData(); data.append("file", file); return apiClient.post<Job>(`/meetings/${id}/media`, data); },
+  create: async (body: Pick<Meeting, "title" | "description" | "source_type" | "language_mode" | "diarization_enabled">) => {
+    listCache = null;
+    return apiClient.post<Meeting>("/meetings", body);
+  },
+  update: async (id: string, body: Partial<Pick<Meeting, "title" | "description" | "language_mode" | "diarization_enabled">>) => {
+    listCache = null;
+    bundleCache.delete(id);
+    return apiClient.patch<Meeting>(`/meetings/${id}`, body);
+  },
+  complete: async (id: string) => {
+    listCache = null;
+    bundleCache.delete(id);
+    return apiClient.post<Meeting>(`/meetings/${id}/complete`);
+  },
+  remove: async (id: string) => {
+    listCache = null;
+    bundleCache.delete(id);
+    return apiClient.delete<void>(`/meetings/${id}`);
+  },
+  uploadMedia: (id: string, file: File) => {
+    bundleCache.delete(id);
+    const data = new FormData();
+    data.append("file", file);
+    return apiClient.post<Job>(`/meetings/${id}/media`, data);
+  },
   media: (id: string) => apiClient.get<MediaFile[]>(`/meetings/${id}/media`),
   playbackUrl: (meetingId: string, mediaId: string) => apiClient.post<{ url: string; expires_in_seconds: number }>(`/meetings/${meetingId}/media/${mediaId}/playback-url`),
   streamMedia: (meetingId: string, mediaId: string) => apiClient.getBlob(`/meetings/${meetingId}/media/${mediaId}/stream`),
   deleteMedia: (meetingId: string, mediaId: string) => apiClient.delete<void>(`/meetings/${meetingId}/media/${mediaId}`),
   transcript: (id: string, page?: Page) => apiClient.get<Transcript>(`/meetings/${id}/transcript${pageQuery(page)}`),
   versions: (id: string, page?: Page) => apiClient.get<Array<{ id: string; version_no: number; source: string; created_at: string }>>(`/meetings/${id}/transcript/versions${pageQuery(page)}`),
-  saveSegment: (id: string, body: { text?: string; start_ms?: number; end_ms?: number }) => apiClient.patch<TranscriptMutation>(`/segments/${id}`, body),
-  deleteSegment: (id: string) => apiClient.delete<TranscriptMutation>(`/segments/${id}`),
-  splitSegment: (id: string, split_at_ms: number, first_text?: string, second_text?: string) => apiClient.post<TranscriptMutation>(`/segments/${id}/split`, { split_at_ms, first_text, second_text }),
-  mergeSegments: (segment_ids: string[]) =>
-    apiClient.post<TranscriptMutation>("/segments/merge", {
+  saveSegment: (id: string, body: { text?: string; start_ms?: number; end_ms?: number }) => {
+    bundleCache.clear();
+    return apiClient.patch<TranscriptMutation>(`/segments/${id}`, body);
+  },
+  deleteSegment: (id: string) => {
+    bundleCache.clear();
+    return apiClient.delete<TranscriptMutation>(`/segments/${id}`);
+  },
+  splitSegment: (id: string, split_at_ms: number, first_text?: string, second_text?: string) => {
+    bundleCache.clear();
+    return apiClient.post<TranscriptMutation>(`/segments/${id}/split`, { split_at_ms, first_text, second_text });
+  },
+  mergeSegments: (segment_ids: string[]) => {
+    bundleCache.clear();
+    return apiClient.post<TranscriptMutation>("/segments/merge", {
       segment_ids,
       first_segment_id: segment_ids[0],
       second_segment_id: segment_ids[1],
-    }),
+    });
+  },
   speakers: (id: string) => apiClient.get<Speaker[]>(`/meetings/${id}/speakers`),
-  updateSpeaker: (id: string, body: Partial<Speaker>) => apiClient.patch<Speaker>(`/speakers/${id}`, body),
-  deleteSpeaker: (id: string) => apiClient.delete<void>(`/speakers/${id}`),
+  updateSpeaker: (id: string, body: Partial<Speaker>) => {
+    bundleCache.clear();
+    return apiClient.patch<Speaker>(`/speakers/${id}`, body);
+  },
+  deleteSpeaker: (id: string) => {
+    bundleCache.clear();
+    return apiClient.delete<void>(`/speakers/${id}`);
+  },
   speakerSample: (id: string) => apiClient.get<SpeakerSample>(`/speakers/${id}/sample`),
-  setSegmentSpeaker: (id: string, speaker_id: string | null) => apiClient.patch<TranscriptMutation>(`/segments/${id}/speaker`, { speaker_id }),
+  setSegmentSpeaker: (id: string, speaker_id: string | null) => {
+    bundleCache.clear();
+    return apiClient.patch<TranscriptMutation>(`/segments/${id}/speaker`, { speaker_id });
+  },
   createSpeaker: (meetingId: string, body: Pick<Speaker, "name"> & Partial<Pick<Speaker, "role" | "organization" | "voice_profile_id">>) => apiClient.post<Speaker>(`/meetings/${meetingId}/speakers`, body),
   addMember: (meetingId: string, email: string, permission: Exclude<Permission, "owner">, attachments: Array<"audio" | "transcript" | "summary" | "translation"> = []) => apiClient.post<void>(`/meetings/${meetingId}/members`, { email, permission, attachments }),
   translation: (id: string, source_language: string, target_language: string) => apiClient.post<Job>(`/meetings/${id}/translations`, { source_language, target_language }),
@@ -75,7 +149,18 @@ export const meetingsApi = {
   shares: (id: string) => apiClient.get<ShareLink[]>(`/meetings/${id}/shares`),
   redeem: (token: string) => apiClient.post<Meeting>(`/shares/${token}/redeem`),
 };
-export const capabilitiesApi = { get: () => apiClient.get<Capabilities>("/capabilities") };
+let cachedCapabilities: Promise<Capabilities> | null = null;
+export const capabilitiesApi = {
+  get: () => {
+    if (!cachedCapabilities) {
+      cachedCapabilities = apiClient.get<Capabilities>("/capabilities").catch((err) => {
+        cachedCapabilities = null;
+        throw err;
+      });
+    }
+    return cachedCapabilities;
+  },
+};
 export const jobsApi = { get: (id: string) => apiClient.get<Job>(`/jobs/${id}`) };
 export const sharesApi = {
   resolve: (token: string) => apiClient.get<{ meeting: Meeting; permission: Exclude<Permission, "owner"> }>(`/shares/${token}`),

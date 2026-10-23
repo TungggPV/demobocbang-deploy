@@ -161,7 +161,16 @@ class DatabaseStorageBackend:
     """Stores binary media objects in PostgreSQL for durable persistence across container restarts."""
 
     def __init__(self, database_url: str, local_root: Path | None = None) -> None:
-        self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
+        connect_args = {
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+            "command_timeout": 60,
+        }
+        self._engine: AsyncEngine = create_async_engine(
+            database_url,
+            pool_pre_ping=False,
+            connect_args=connect_args,
+        )
         self._local_root: Path | None = local_root.resolve() if local_root else None
 
     async def put_file(self, source: Path, key: str) -> None:
@@ -208,7 +217,19 @@ class DatabaseStorageBackend:
                 data = result.scalar()
                 if data is None:
                     raise StorageNotFoundError("Object was not found.")
-                return bytes(data)
+                result_bytes = bytes(data)
+                if self._local_root:
+                    dest = self._local_root / key
+                    if not dest.is_file():
+                        async def _cache_full(d: Path, k: str):
+                            try:
+                                full_data = await self.get_bytes(k)
+                                await asyncio.to_thread(d.parent.mkdir, parents=True, exist_ok=True)
+                                await asyncio.to_thread(d.write_bytes, full_data)
+                            except Exception:
+                                pass
+                        asyncio.create_task(_cache_full(dest, key))
+                return result_bytes
         except StorageNotFoundError:
             raise
         except Exception as exc:
@@ -238,7 +259,19 @@ class DatabaseStorageBackend:
                 data = result.scalar()
                 if data is None:
                     raise StorageNotFoundError("Object was not found.")
-                return bytes(data)
+                result_bytes = bytes(data)
+                if self._local_root:
+                    dest = self._local_root / key
+                    if not dest.is_file():
+                        async def _cache_full(d: Path, k: str):
+                            try:
+                                full_data = await self.get_bytes(k)
+                                await asyncio.to_thread(d.parent.mkdir, parents=True, exist_ok=True)
+                                await asyncio.to_thread(d.write_bytes, full_data)
+                            except Exception:
+                                pass
+                        asyncio.create_task(_cache_full(dest, key))
+                return result_bytes
         except StorageNotFoundError:
             raise
         except Exception as exc:

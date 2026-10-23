@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Select, select
@@ -15,6 +17,15 @@ from app.models.user import EmailOtp, User
 from app.providers.email import EmailSender
 from app.schemas.auth import AuthSessionResponse, UserResponse
 
+
+import time
+
+# In-memory user cache: user_id -> (cached_at, User)
+_USER_CACHE: dict[UUID, tuple[float, User]] = {}
+_USER_CACHE_TTL = 60.0
+
+def invalidate_user_cache(user_id: UUID) -> None:
+    _USER_CACHE.pop(user_id, None)
 
 class AuthService:
     def __init__(
@@ -89,9 +100,14 @@ class AuthService:
 
     async def user_from_access_token(self, token: str) -> User:
         user_id = self._tokens.verify(token, "access")
+        now = time.monotonic()
+        cached = _USER_CACHE.get(user_id)
+        if cached is not None and (now - cached[0]) < _USER_CACHE_TTL:
+            return cached[1]
         user = await self._session.get(User, user_id)
         if user is None or not user.is_email_verified:
             raise ApiError("AUTH_REQUIRED", "Authentication is required.", 401)
+        _USER_CACHE[user_id] = (now, user)
         return user
 
     async def update_profile(self, user: User, full_name: str) -> User:
@@ -133,11 +149,12 @@ class AuthService:
         await self._session.commit()
         return user
 
-    def issue_oauth_state(self) -> str:
-        return self._tokens.issue_oauth_state()
+    def issue_oauth_state(self, return_to: str | None = None) -> str:
+        extra = {"return_to": return_to} if return_to else None
+        return self._tokens.issue_oauth_state(extra=extra)
 
-    def verify_oauth_state(self, state: str) -> None:
-        self._tokens.verify_oauth_state(state)
+    def verify_oauth_state(self, state: str) -> dict[str, Any]:
+        return self._tokens.verify_oauth_state(state)
 
     def session_response(self, user: User) -> AuthSessionResponse:
         return self._session_response(user)

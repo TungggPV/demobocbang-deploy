@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     max_media_duration_seconds: int = 7_200
     storage_backend: str = "local"
     media_storage_path: Path = Field(default_factory=_default_media_storage_path)
+
+    @field_validator("media_storage_path", mode="after")
+    @classmethod
+    def _resolve_storage_path(cls, path: Path) -> Path:
+        if not path.is_absolute():
+            return (REPOSITORY_ROOT / path).resolve()
+        return path
     s3_endpoint_url: str | None = Field(
         default=None, validation_alias=AliasChoices("S3_ENDPOINT_URL", "S3_ENDPOINT")
     )
