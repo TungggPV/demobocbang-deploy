@@ -39,13 +39,27 @@ class FallbackLLMProvider:
             max_context_tokens=primary.max_context_tokens or fallback.max_context_tokens,
         )
 
+    async def polish_transcript(self, segments: tuple[str, ...], context: str) -> tuple[str, ...]:
+        try:
+            return await self._primary.polish_transcript(segments, context)
+        except LLMProviderError:
+            return await self._fallback.polish_transcript(segments, context)
+
     async def generate_summary(
-        self, transcript: str, template: str, output_language: str
+        self,
+        transcript: str,
+        prompt: str | None,
+        output_language: str,
+        template: str | None = None,
     ) -> dict[str, object]:
         try:
-            return await self._primary.generate_summary(transcript, template, output_language)
+            return await self._primary.generate_summary(
+                transcript, prompt, output_language, template
+            )
         except LLMProviderError:
-            return await self._fallback.generate_summary(transcript, template, output_language)
+            return await self._fallback.generate_summary(
+                transcript, prompt, output_language, template
+            )
 
 
 llm_provider_registry = LLMProviderRegistry()

@@ -46,8 +46,11 @@ async def capabilities(request: Request) -> dict[str, object]:
     pairs = sorted(translation_provider.capabilities().supported_language_pairs) if translation_provider else []
     return {
         "stt": stt,
+        "meeting_voice_learning": bool(getattr(request.app.state, "speaker_enrollment_provider", None)),
+        "transcript_polish": bool(llm_provider and callable(getattr(llm_provider, "polish_transcript", None))),
         "translation": {"languages": sorted({language for pair in pairs for language in pair}), "language_pairs": [list(pair) for pair in pairs]},
         "summary_templates": ["general", "briefing", "voting"] if llm_provider and llm_provider.capabilities().structured_output else [],
+        "custom_summary_prompt": bool(llm_provider and llm_provider.capabilities().structured_output),
         "summary_languages": ["vi", "en"] if llm_provider and llm_provider.capabilities().structured_output else [],
         "exports": ["pdf", "docx", "txt", "srt", "vtt", "json"],
     }

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import JSON, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -24,9 +24,11 @@ class Summary(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         UniqueConstraint(
             "meeting_id",
             "transcript_version_id",
+            "scope",
+            "mode",
             "template_type",
             "output_language",
-            name="uq_summary_transcript_template_language",
+            name="uq_summary_input_scope_mode_language",
         ),
     )
 
@@ -39,6 +41,8 @@ class Summary(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     template_type: Mapped[SummaryTemplateType] = mapped_column(
         domain_enum(SummaryTemplateType, "summary_template_type"), nullable=False
     )
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="template")
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="meeting", server_default="meeting")
     output_language: Mapped[str] = mapped_column(String(2), nullable=False)
 
     meeting: Mapped[Meeting] = relationship(back_populates="summaries")
@@ -56,6 +60,7 @@ class SummaryVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ForeignKey("summaries.id", ondelete="CASCADE"), nullable=False, index=True
     )
     version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
     provider: Mapped[str] = mapped_column(String(255), nullable=False)
     model: Mapped[str] = mapped_column(String(255), nullable=False)

@@ -15,6 +15,7 @@ from app.providers.contracts import (
     TranslationCapabilities,
     TranslationProviderError,
 )
+from app.providers.transcript_polish import TranscriptPolishMixin
 
 _SUMMARY_KEYS = ("overview", "key_points", "action_items", "decisions", "risks_notes")
 
@@ -55,20 +56,6 @@ class GeminiTranslationProvider(_GeminiBase):
         return TranslationCapabilities(frozenset({("vi", "en"), ("en", "vi")}))
 
     async def translate_segments(self, segments: tuple[TranscriptionSegment, ...], source: str, target: str) -> tuple[TranscriptionSegment, ...]:
-        if not segments:
-            return ()
-        batch_size = 35
-        if len(segments) <= batch_size:
-            return await self._translate_batch(segments, source, target)
-
-        results: list[TranscriptionSegment] = []
-        for i in range(0, len(segments), batch_size):
-            chunk = segments[i : i + batch_size]
-            translated_chunk = await self._translate_batch(chunk, source, target)
-            results.extend(translated_chunk)
-        return tuple(results)
-
-    async def _translate_batch(self, segments: tuple[TranscriptionSegment, ...], source: str, target: str) -> tuple[TranscriptionSegment, ...]:
         schema: dict[str, object] = {"type": "object", "properties": {"translations": {"type": "array", "items": {"type": "string"}}}, "required": ["translations"]}
         prompt = f"Translate every transcript segment from {source} to {target}. Preserve order, meaning, names, numbers, and do not merge or omit segments. Return JSON only. Segments:\n" + json.dumps([item.text for item in segments], ensure_ascii=False)
         try:
@@ -81,21 +68,51 @@ class GeminiTranslationProvider(_GeminiBase):
         return tuple(TranscriptionSegment(item.start_ms, item.end_ms, text.strip(), item.speaker_label, item.confidence) for item, text in zip(segments, texts, strict=True))
 
 
-class GeminiSummaryProvider(_GeminiBase):
+class GeminiSummaryProvider(TranscriptPolishMixin, _GeminiBase):
     def capabilities(self) -> LLMCapabilities:
         return LLMCapabilities(structured_output=True, max_context_tokens=None)
 
     async def generate_summary(
-        self, transcript: str, template: str, output_language: str
+        self,
+        transcript: str,
+        user_prompt: str | None,
+        output_language: str,
+        template: str | None = None,
     ) -> dict[str, object]:
-        schema: dict[str, object] = {"type": "object", "properties": {"overview": {"type": "string"}, **{key: {"type": "array", "items": {"type": "string"}} for key in _SUMMARY_KEYS[1:]}}, "required": list(_SUMMARY_KEYS)}
         language_name = {"vi": "Vietnamese", "en": "English"}[output_language]
-        prompt = (
-            f"Create a faithful {template} meeting summary from the transcript. Never invent facts. "
-            "For voting, emphasize decisions and votes; for briefing, make actions concise. "
-            f"Write every human-readable value in {language_name}. Keep the JSON property names unchanged. "
-            f"Return JSON only.\n\nTranscript:\n{transcript}"
-        )
+        if template:
+            schema: dict[str, object] = {"type": "object", "properties": {"overview": {"type": "string"}, **{key: {"type": "array", "items": {"type": "string"}} for key in _SUMMARY_KEYS[1:]}}, "required": list(_SUMMARY_KEYS)}
+            focus = {
+                "general": "Cover the overall discussion and the most important outcomes.",
+                "briefing": "Emphasize concise updates, blockers, owners, and next actions.",
+                "voting": "Emphasize motions, voting results, decisions, and dissenting views.",
+            }.get(template, "Cover the most important meeting outcomes.")
+            prompt = (
+                f"Create a faithful {template} meeting summary. {focus} "
+                "Use only facts present in the transcript and never invent details. "
+                f"Write every human-readable value in {language_name}. Keep the JSON property names unchanged. "
+                f"Return JSON only.\n\nTranscript:\n{transcript}"
+            )
+        else:
+            if not user_prompt:
+                raise LLMProviderError(
+                    "A custom summary prompt is required.", retryable=False
+                )
+            schema = {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                },
+                "required": ["content"],
+            }
+            prompt = (
+                "Create a faithful meeting summary that follows the user's requested structure and length. "
+                "Place the entire result in the JSON content string. The content may contain plain-text "
+                "headings, paragraphs, numbered lists, or bullet lists when the user asks for them. "
+                "Use only facts present in the transcript and never invent details. "
+                f"Write every human-readable value in {language_name}. Return JSON only. "
+                f"\n\nUser request:\n{user_prompt}\n\nTranscript:\n{transcript}"
+            )
         return await self._generate(prompt, schema)
 
 

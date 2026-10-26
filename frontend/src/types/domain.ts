@@ -2,6 +2,7 @@ export type MeetingStatus = "created" | "queued" | "recording" | "processing" | 
 export type JobStatus = "queued" | "processing" | "retrying" | "completed" | "failed";
 export type Permission = "owner" | "edit" | "comment" | "read";
 export type SummaryTemplate = "general" | "briefing" | "voting";
+export type SummaryMode = "template" | "custom";
 export type SummaryLanguage = "vi" | "en";
 export type ExportFormat = "pdf" | "docx" | "txt" | "srt" | "vtt" | "json";
 
@@ -19,15 +20,24 @@ export interface VoiceSampleItem { index: number; has_audio: boolean }
 export interface VoiceProfile { id: string; user_id?: string; meeting_id?: string; name: string; sample_duration_ms: number; provider: string; sample_count: number; has_audio?: boolean; samples?: VoiceSampleItem[]; created_at: string; updated_at: string }
 export interface Segment { logical_segment_id: string; start_ms: number; end_ms: number; text: string; speaker_id?: string; speaker_label?: string; confidence?: number }
 export interface Transcript { version_id: string; version_no: number; language: string; segments: Segment[]; next_cursor?: string | null }
+export interface MeetingSection { id: string; meeting_id: string; sequence: number; title: string; start_ms: number; end_ms: number | null; is_started: boolean; revision?: string | null }
+export type SummaryScope = "meeting" | "sessions";
+export interface SessionSummary { id: string | null; title: string; sequence: number; start_ms: number; end_ms: number | null; content: Record<string, unknown> | null }
 export interface Capabilities {
+  transcript_polish?: boolean;
+  meeting_voice_learning?: boolean;
   stt: { provider: string; fallback_provider?: string; batch: boolean; streaming: boolean; speaker_identification?: boolean; diarization: boolean; languages: string[]; timestamps?: boolean; confidence?: boolean };
-  translation: { languages: string[]; language_pairs?: [string, string][] }; summary_templates: SummaryTemplate[]; summary_languages: SummaryLanguage[]; exports: ExportFormat[];
+  translation: { languages: string[]; language_pairs?: [string, string][] }; summary_templates: SummaryTemplate[]; custom_summary_prompt?: boolean; summary_languages: SummaryLanguage[]; exports: ExportFormat[];
 }
 export interface Job { id: string; status: JobStatus; progress?: number; error?: { code: string; message: string } }
+export interface TranscriptPolish {
+  job: Job; source_version_id: string; accepted_version_id?: string | null; revision: number;
+  segments: Array<{ logical_segment_id: string; speaker_id?: string | null; start_ms: number; end_ms: number; original_text: string; generated_text: string; text: string }>;
+}
 export interface TranslationSegment { logical_segment_id: string; text: string }
 export interface Translation { id: string; source_language: string; target_language: string; segments: TranslationSegment[]; created_at: string }
-export interface SummaryVersion { version_no: number; content: Record<string, unknown>; created_at: string }
-export interface Summary { id: string; template: SummaryTemplate; output_language: SummaryLanguage; current_version: SummaryVersion }
+export interface SummaryVersion { version_no: number; prompt?: string; content: Record<string, unknown>; created_at: string }
+export interface Summary { id: string; scope?: SummaryScope; transcript_version_id?: string; mode?: SummaryMode; template?: SummaryTemplate | null; output_language: SummaryLanguage; current_version: SummaryVersion }
 export interface Comment {
   id: string;
   parent_comment_id?: string | null;
@@ -53,3 +63,10 @@ export interface MeetingBundle {
   speakers: Speaker[];
   translations: Translation[];
 }
+export type MeetingRecording = {
+  status: "not_completed" | "unavailable" | "pending" | "ready" | "failed" | "deleted";
+  media: MediaFile | null;
+  job: Job | null;
+  can_prepare: boolean;
+  warning: string | null;
+};

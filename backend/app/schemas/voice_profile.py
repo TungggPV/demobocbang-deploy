@@ -41,3 +41,12 @@ class VoiceProfileCandidateResponse(BaseModel):
 
 class VoiceProfileCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+
+
+class MeetingVoiceSampleRequest(BaseModel):
+    segment_ids: list[UUID] = Field(min_length=1, max_length=50)
+
+
+class MeetingVoiceLearningRequest(MeetingVoiceSampleRequest):
+    name: str = Field(min_length=1, max_length=255)
+    profile_id: UUID | None = None

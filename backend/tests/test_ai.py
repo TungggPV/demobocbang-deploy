@@ -52,10 +52,26 @@ class FakeLLM:
     def capabilities(self) -> LLMCapabilities:
         return LLMCapabilities(structured_output=True, max_context_tokens=4096)
 
-    async def generate_summary(self, transcript: str, template: str, output_language: str) -> dict[str, object]:
+    async def generate_summary(
+        self,
+        transcript: str,
+        prompt: str | None,
+        output_language: str,
+        template: str | None = None,
+    ) -> dict[str, object]:
         if self.fail:
             raise LLMProviderError("Fake LLM unavailable.", retryable=True)
-        return {"overview": f"{output_language}:{template}: {transcript}", "key_points": [template], "action_items": [], "decisions": [], "risks_notes": []}
+        if template:
+            return {
+                "overview": f"{output_language}:{template}: {transcript}",
+                "key_points": [template],
+                "action_items": [],
+                "decisions": [],
+                "risks_notes": [],
+            }
+        return {
+            "content": f"{output_language}: {prompt}: {transcript}",
+        }
 
 
 def test_vi_en_and_en_vi_translation_preserve_source_and_segment_mapping(tmp_path: Path) -> None:
@@ -90,50 +106,94 @@ def test_translation_capability_empty_input_and_permissions(tmp_path: Path) -> N
         assert ["en", "vi"] in capabilities["translation"]["language_pairs"]
 
 
-def test_summary_templates_languages_and_regeneration_versions(tmp_path: Path) -> None:
+def test_summary_modes_custom_structure_manual_edits_and_versions(tmp_path: Path) -> None:
     app, sender, url = _app(tmp_path)
     app.state.translation_provider, app.state.llm_provider = FakeTranslation(), FakeLLM()
     with TestClient(app) as client:
         owner = _session(client, sender, "summary@example.com")
-        seed, headers = _seed(url, UUID(owner["user"]["id"])), _headers(owner)
+        commenter = _session(client, sender, "summary-commenter@example.com")
+        seed, headers = _seed(url, UUID(owner["user"]["id"]), UUID(commenter["user"]["id"])), _headers(owner)
         endpoint = f"/api/v1/meetings/{seed['meeting_id']}/summaries"
 
-        assert client.post(endpoint, headers=headers, json={"template": "general"}).status_code == 422
-        assert client.post(endpoint, headers=headers, json={"template": "general", "output_language": "fr"}).status_code == 422
+        assert client.post(endpoint, headers=headers, json={"output_language": "vi"}).status_code == 422
+        assert client.post(endpoint, headers=headers, json={"mode": "template", "output_language": "vi"}).status_code == 422
+        assert client.post(endpoint, headers=headers, json={"mode": "template", "template": "general", "prompt": "Không hợp lệ", "output_language": "vi"}).status_code == 422
+        assert client.post(endpoint, headers=headers, json={"mode": "custom", "prompt": "   ", "output_language": "vi"}).status_code == 422
+        assert client.post(endpoint, headers=headers, json={"mode": "custom", "template": "general", "prompt": "Không hợp lệ", "output_language": "vi"}).status_code == 422
+        assert client.post(endpoint, headers=headers, json={"mode": "custom", "prompt": "x" * 4001, "output_language": "vi"}).status_code == 422
+        assert client.post(endpoint, headers=headers, json={"mode": "custom", "prompt": "Tóm tắt", "output_language": "fr"}).status_code == 422
 
-        for template in ("general", "briefing", "voting"):
-            job = client.post(
-                endpoint,
-                headers=headers,
-                json={"template": template, "output_language": "vi"},
-            )
-            assert _job(client, headers, job.json()["id"])["status"] == "completed"
+        built_in = client.post(
+            endpoint,
+            headers=headers,
+            json={"mode": "template", "template": "general", "output_language": "vi"},
+        )
+        assert _job(client, headers, built_in.json()["id"])["status"] == "completed"
+
+        vietnamese_prompt = "Tóm tắt các quyết định và người chịu trách nhiệm."
+        vietnamese = client.post(
+            endpoint,
+            headers=headers,
+            json={"mode": "custom", "prompt": vietnamese_prompt, "output_language": "vi"},
+        )
+        assert _job(client, headers, vietnamese.json()["id"])["status"] == "completed"
         english = client.post(
             endpoint,
             headers=headers,
-            json={"template": "general", "output_language": "en"},
+            json={"mode": "custom", "prompt": "Summarize the main outcomes.", "output_language": "en"},
         )
         assert _job(client, headers, english.json()["id"])["status"] == "completed"
 
         summaries = client.get(endpoint, headers=headers).json()
-        general_vi = next(item for item in summaries if item["template"] == "general" and item["output_language"] == "vi")
-        general_en = next(item for item in summaries if item["template"] == "general" and item["output_language"] == "en")
-        assert general_vi["id"] != general_en["id"]
-        assert general_vi["current_version"]["content"]["overview"].startswith("vi:")
-        assert general_en["current_version"]["content"]["overview"].startswith("en:")
+        template_vi = next(item for item in summaries if item["mode"] == "template")
+        custom_vi = next(item for item in summaries if item["mode"] == "custom" and item["output_language"] == "vi")
+        custom_en = next(item for item in summaries if item["mode"] == "custom" and item["output_language"] == "en")
+        assert template_vi["template"] == "general"
+        assert set(template_vi["current_version"]["content"]) == {"overview", "key_points", "action_items", "decisions", "risks_notes"}
+        assert custom_vi["id"] != template_vi["id"] != custom_en["id"]
+        assert custom_vi["template"] is None
+        assert custom_vi["current_version"]["prompt"] == vietnamese_prompt
+        assert custom_vi["current_version"]["content"]["content"].startswith(f"vi: {vietnamese_prompt}")
 
+        regenerated_prompt = "Chỉ tập trung vào các công việc tiếp theo."
         regenerate = client.post(
             endpoint,
             headers=headers,
-            json={"template": "general", "output_language": "vi"},
+            json={"mode": "custom", "prompt": regenerated_prompt, "output_language": "vi"},
         )
         assert _job(client, headers, regenerate.json()["id"])["status"] == "completed"
-        vi_versions = client.get(f"/api/v1/summaries/{general_vi['id']}/versions", headers=headers).json()
-        en_versions = client.get(f"/api/v1/summaries/{general_en['id']}/versions", headers=headers).json()
+        vi_versions = client.get(f"/api/v1/summaries/{custom_vi['id']}/versions", headers=headers).json()
+        en_versions = client.get(f"/api/v1/summaries/{custom_en['id']}/versions", headers=headers).json()
         assert [item["version_no"] for item in vi_versions] == [2, 1]
+        assert [item["prompt"] for item in vi_versions] == [regenerated_prompt, vietnamese_prompt]
         assert [item["version_no"] for item in en_versions] == [1]
-        assert client.get(f"/api/v1/summaries/{general_vi['id']}/versions/{vi_versions[1]['id']}", headers=headers).status_code == 200
-        assert client.get("/api/v1/capabilities").json()["summary_languages"] == ["vi", "en"]
+        assert client.get(f"/api/v1/summaries/{custom_vi['id']}/versions/{vi_versions[1]['id']}", headers=headers).status_code == 200
+
+        edited_content = {
+            "content": "Biên bản đã chỉnh sửa\n\nKết luận\nNội dung do người dùng sửa.",
+        }
+        denied = client.patch(
+            f"/api/v1/summaries/{custom_vi['id']}",
+            headers=_headers(commenter),
+            json={"content": edited_content},
+        )
+        assert denied.status_code == 403
+        edited = client.patch(
+            f"/api/v1/summaries/{custom_vi['id']}",
+            headers=headers,
+            json={"content": edited_content},
+        )
+        assert edited.status_code == 200
+        assert edited.json()["current_version"]["version_no"] == 3
+        assert edited.json()["current_version"]["content"] == edited_content
+        assert edited.json()["current_version"]["provider"] == "user"
+        vi_versions = client.get(f"/api/v1/summaries/{custom_vi['id']}/versions", headers=headers).json()
+        assert [item["version_no"] for item in vi_versions] == [3, 2, 1]
+        assert vi_versions[0]["prompt"] == regenerated_prompt
+        capabilities = client.get("/api/v1/capabilities").json()
+        assert capabilities["custom_summary_prompt"] is True
+        assert capabilities["summary_templates"] == ["general", "briefing", "voting"]
+        assert capabilities["summary_languages"] == ["vi", "en"]
 
 def test_provider_failure_marks_job_failed_with_retryability(tmp_path: Path) -> None:
     app, sender, url = _app(tmp_path)
@@ -144,7 +204,7 @@ def test_provider_failure_marks_job_failed_with_retryability(tmp_path: Path) -> 
         translation = client.post(f"/api/v1/meetings/{seed['meeting_id']}/translations", headers=headers, json={"source_language": "vi", "target_language": "en"})
         failed_translation = _job(client, headers, translation.json()["id"])
         assert failed_translation["status"] == "failed" and failed_translation["error"]["retryable"] is False
-        summary = client.post(f"/api/v1/meetings/{seed['meeting_id']}/summaries", headers=headers, json={"template": "general", "output_language": "vi"})
+        summary = client.post(f"/api/v1/meetings/{seed['meeting_id']}/summaries", headers=headers, json={"mode": "custom", "prompt": "Tóm tắt cuộc họp.", "output_language": "vi"})
         failed_summary = _job(client, headers, summary.json()["id"])
         assert failed_summary["status"] == "failed" and failed_summary["error"]["retryable"] is True
 
@@ -158,7 +218,7 @@ def test_summary_requires_available_structured_provider(tmp_path: Path) -> None:
         response = client.post(
             f"/api/v1/meetings/{seed['meeting_id']}/summaries",
             headers=_headers(owner),
-            json={"template": "general", "output_language": "vi"},
+            json={"mode": "custom", "prompt": "Tóm tắt cuộc họp.", "output_language": "vi"},
         )
         assert response.status_code == 503
 

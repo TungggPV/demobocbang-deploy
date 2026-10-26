@@ -5,15 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import tempfile
-import wave
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
-from pathlib import Path
 from time import perf_counter
 from typing import Any, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from anyio import CancelScope
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
@@ -22,10 +19,8 @@ from app.core.config import Settings
 from app.core.errors import ApiError
 from app.core.security import TokenService
 from app.db.session import Database
-from app.models.enums import MeetingPermission
-from app.models.media import MediaFile
+from app.models.enums import MeetingPermission, MeetingStatus
 from app.models.user import User
-from app.providers.storage import MediaStorage
 from app.providers.contracts import (
     StreamingEvent,
     StreamingOptions,
@@ -35,6 +30,8 @@ from app.providers.contracts import (
     STTStream,
     TranslationProvider,
 )
+from app.services.meeting_audio import RealtimeAudioWriter
+from app.services.meeting_sections import MeetingSectionService
 from app.services.meetings import MeetingService
 from app.services.realtime import RealtimeTranscriptService
 from app.services.realtime_translation import (
@@ -51,6 +48,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class RealtimeCommand:
     type: str
+    new_section: bool = False
+    acknowledge: bool = False
     target_language: str | None = None
     logical_segment_ids: tuple[UUID, ...] = ()
 
@@ -62,97 +61,13 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
     stream: STTStream | None = None
     transcript_service: RealtimeTranscriptService | None = None
     translation_session: RealtimeTranslationSession | None = None
-    terminal_failure = False
-    retryable_interruption = False
+    audio_writer: RealtimeAudioWriter | None = None
     send_lock = asyncio.Lock()
     session_stack = AsyncExitStack()
-    pcm_temp_file = tempfile.NamedTemporaryFile(prefix="recording-pcm-", suffix=".pcm", delete=False)
-    pcm_path = Path(pcm_temp_file.name)
-    pcm_bytes_count = 0
-    media_saved = False
-    meeting = None
-    session = None
 
     async def send_json(payload: dict[str, object]) -> None:
         async with send_lock:
             await websocket.send_json(payload)
-
-    async def _save_realtime_media() -> None:
-        nonlocal media_saved, pcm_bytes_count
-        if media_saved:
-            return
-        media_saved = True
-        try:
-            if not pcm_temp_file.closed:
-                pcm_temp_file.flush()
-                pcm_temp_file.close()
-        except OSError:
-            pass
-
-        if session is None or meeting is None or pcm_bytes_count <= 0 or not pcm_path.exists():
-            return
-
-        storage = cast(
-            MediaStorage | None, getattr(websocket.app.state, "media_storage", None)
-        )
-        if storage is None:
-            return
-
-        wav_temp = tempfile.NamedTemporaryFile(
-            prefix="recording-wav-", suffix=".wav", delete=False
-        )
-        wav_path = Path(wav_temp.name)
-        wav_temp.close()
-
-        try:
-            with open(pcm_path, "rb") as pcm_in, wave.open(str(wav_path), "wb") as wav_out:
-                wav_out.setnchannels(1)
-                wav_out.setsampwidth(2)
-                wav_out.setframerate(16000)
-                while True:
-                    data = pcm_in.read(65536)
-                    if not data:
-                        break
-                    wav_out.writeframes(data)
-
-            wav_size = wav_path.stat().st_size
-            duration_ms = max(1000, int((pcm_bytes_count / 32000) * 1000))
-            media_id = uuid4()
-            storage_key = f"media/meetings/{meeting.id}/{media_id}.wav"
-            await storage.put_file(wav_path, storage_key)
-
-            media = MediaFile(
-                id=media_id,
-                meeting_id=meeting.id,
-                original_filename=f"{meeting.title}.wav",
-                mime_type="audio/wav",
-                size_bytes=wav_size,
-                duration_ms=duration_ms,
-                storage_key=storage_key,
-                status="ready",
-            )
-            session.add(media)
-            if (meeting.duration_ms or 0) < duration_ms:
-                meeting.duration_ms = duration_ms
-            await session.commit()
-            logger.info(
-                "realtime_audio_persisted",
-                extra={
-                    "meeting_id": str(meeting.id),
-                    "media_id": str(media_id),
-                    "duration_ms": duration_ms,
-                    "size_bytes": wav_size,
-                },
-            )
-        except Exception:
-            logger.exception(
-                "realtime_audio_persist_failed", extra={"meeting_id": str(meeting.id)}
-            )
-        finally:
-            try:
-                wav_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     try:
         settings = cast(Settings, websocket.app.state.settings)
@@ -185,6 +100,9 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
         meeting, _ = await MeetingService(session).require_access(
             meeting_id, user, MeetingPermission.EDIT
         )
+        start_paused = websocket.query_params.get("start_paused") == "1"
+        if meeting.status == MeetingStatus.COMPLETED:
+            raise ApiError("MEETING_COMPLETED", "This meeting has already ended.", 409)
         known_speakers = await VoiceProfileService(session).list_known_speakers(
             meeting_id
         )
@@ -214,16 +132,27 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
             )
             return
         transcript_service = RealtimeTranscriptService(session, meeting, user.id)
+        audio_writer = RealtimeAudioWriter(
+            session, websocket.app.state.media_storage, meeting.id,
+            transcript_service.time_offset_ms, settings.max_media_duration_seconds * 1000,
+        )
         if translation_provider is not None:
             translation_session = RealtimeTranslationSession(
                 translation_provider,
                 meeting.language_mode,
                 send_json,
             )
-        await transcript_service.recording_started()
+        if start_paused:
+            await session.refresh(meeting, with_for_update=True)
+            await MeetingSectionService(session).ensure(meeting)
+            await session.commit()
+            await stream.pause()
+        else:
+            await transcript_service.recording_started()
         await send_json(
             {
                 "type": "session.ready",
+                "paused": start_paused,
                 "provider": getattr(
                     stream,
                     "provider_name",
@@ -236,16 +165,15 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
                 "fallback_active": getattr(stream, "fallback_active", False),
             }
         )
-        paused = False
+        paused = start_paused
+        split_pending = start_paused
         while True:
             try:
-                message = await _receive_with_events(
+                message = (await _receive_with_events(
                     websocket, stream, send_json, transcript_service, translation_session
-                )
+                )) if stream is not None else await websocket.receive()
             except STTProviderError as exc:
-                terminal_failure = not exc.retryable
-                retryable_interruption = exc.retryable
-                if terminal_failure:
+                if not exc.retryable:
                     await transcript_service.recording_failed()
                 await _handle_provider_error(websocket, send_json, exc)
                 return
@@ -261,28 +189,25 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
                     )
                     continue
                 try:
-                    chunk = message["bytes"]
-                    if not pcm_temp_file.closed:
-                        pcm_temp_file.write(chunk)
-                        pcm_bytes_count += len(chunk)
-                    events = await stream.send_audio(chunk)
+                    await audio_writer.append(message["bytes"])
+                    events = await stream.send_audio(message["bytes"])
                     await _emit_events(
                         send_json,
                         transcript_service,
                         events,
                         translation_session=translation_session,
                     )
+                except ApiError as exc:
+                    await _error_and_close(websocket, send_json, exc.code, exc.message, False)
+                    return
                 except STTProviderError as exc:
-                    terminal_failure = not exc.retryable
-                    retryable_interruption = exc.retryable
-                    if terminal_failure:
+                    if not exc.retryable:
                         await transcript_service.recording_failed()
                     await _handle_provider_error(websocket, send_json, exc)
                     return
                 except ValueError as exc:
                     await _send_error(send_json, "STT_RESULT_INVALID", str(exc), False)
                 except Exception:
-                    retryable_interruption = True
                     await _handle_provider_error(
                         websocket,
                         send_json,
@@ -365,15 +290,67 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
                 await send_json({"type": "translation.status", "enabled": False})
                 continue
             try:
-                if command.type == "recording.pause":
-                    paused = True
+                if command.type == "recording.pause" and command.new_section:
+                    if not paused:
+                        await _emit_events(send_json, transcript_service, await stream.close(),
+                                           translation_session=translation_session)
+                        stream = None
+                        await audio_writer.flush()
+                        boundary = max(audio_writer.end_ms, meeting.duration_ms or 0)
+                        next_section = await MeetingSectionService(session).split(meeting, boundary)
+                        boundary = next_section.start_ms
+                        await session.commit()
+                        # The next upstream and retained audio use the same new clock.
+                        audio_writer = RealtimeAudioWriter(session, websocket.app.state.media_storage,
+                            meeting.id, boundary, settings.max_media_duration_seconds * 1000)
+                    paused, split_pending = True, True
+                    await send_json({"type": "meeting.sections", "paused": True,
+                        "sections": [row.model_dump(mode="json") for row in await MeetingSectionService(session).list(meeting_id, user)]})
+                elif command.type == "speakers.refresh":
+                    if stream is None:
+                        await send_json({"type": "speakers.updated", "speaker_identification_available": False, "fallback_active": False, "deferred": True})
+                        continue
                     await _emit_events(
-                        send_json,
-                        transcript_service,
-                        await stream.pause(),
+                        send_json, transcript_service, await stream.close(),
                         translation_session=translation_session,
                     )
+                    stream = None
+                    await audio_writer.flush()
+                    # The replacement provider sees the new voiceprints. Its local
+                    # timestamps start at zero; the retained PCM clock supplies the
+                    # meeting offset, including silence and earlier pauses.
+                    known_speakers = await VoiceProfileService(session).list_known_speakers(meeting_id)
+                    stream = await provider.open_stream(replace(options, known_speakers=known_speakers))
+                    transcript_service = RealtimeTranscriptService(
+                        session, meeting, user.id, time_offset_ms=audio_writer.end_ms,
+                    )
+                    if paused:
+                        await stream.pause()
+                    await send_json({
+                        "type": "speakers.updated",
+                        "speaker_identification_available": getattr(stream, "speaker_identification_available", False),
+                        "fallback_active": getattr(stream, "fallback_active", False),
+                    })
+                elif command.type == "recording.pause":
+                    await audio_writer.flush()
+                    paused = True
+                    if stream is not None:
+                        await _emit_events(
+                            send_json,
+                            transcript_service,
+                            await stream.pause(),
+                            translation_session=translation_session,
+                        )
+                    if command.acknowledge:
+                        await send_json({"type": "recording.paused"})
                 elif command.type == "recording.resume":
+                    resuming_new_section = not (await MeetingSectionService(session).ensure(meeting)).is_started
+                    if stream is None:
+                        known_speakers = await VoiceProfileService(session).list_known_speakers(meeting_id)
+                        stream = await provider.open_stream(replace(options, known_speakers=known_speakers))
+                        transcript_service = RealtimeTranscriptService(session, meeting, user.id,
+                            time_offset_ms=audio_writer.end_ms)
+                    await transcript_service.recording_started()
                     paused = False
                     await _emit_events(
                         send_json,
@@ -381,33 +358,42 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
                         await stream.resume(),
                         translation_session=translation_session,
                     )
+                    if split_pending or command.acknowledge:
+                        await send_json({
+                            "type": "recording.resumed",
+                            "new_section": resuming_new_section,
+                            "speaker_identification_available": getattr(stream, "speaker_identification_available", False),
+                            "fallback_active": getattr(stream, "fallback_active", False),
+                        })
+                        split_pending = False
                 else:  # recording.stop
                     await _emit_events(
                         send_json,
                         transcript_service,
-                        await stream.close(),
+                        await stream.close() if stream is not None else (),
                         translation_session=translation_session,
                     )
                     stream = None
+                    await audio_writer.flush()
                     if translation_session is not None:
                         await translation_session.flush()
                         await translation_session.close()
-                    await _save_realtime_media()
-                    await transcript_service.recording_ended()
+                    from app.services.transcript_polish import complete_with_polish
+                    await complete_with_polish(session, meeting_id, user, websocket.app.state)
                     await send_json({"type": "meeting.status", "status": "completed"})
                     await websocket.close(code=status.WS_1000_NORMAL_CLOSURE)
                     return
             except STTProviderError as exc:
-                terminal_failure = not exc.retryable
-                retryable_interruption = exc.retryable
-                if terminal_failure:
+                if not exc.retryable:
                     await transcript_service.recording_failed()
                 await _handle_provider_error(websocket, send_json, exc)
                 return
             except ValueError as exc:
                 await _send_error(send_json, "STT_RESULT_INVALID", str(exc), False)
+            except ApiError as exc:
+                await _error_and_close(websocket, send_json, exc.code, exc.message, False)
+                return
             except Exception:
-                retryable_interruption = True
                 await _handle_provider_error(
                     websocket,
                     send_json,
@@ -420,14 +406,13 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
         pass
     except ApiError as exc:
         await _error_and_close(websocket, send_json, exc.code, exc.message, retryable=False)
-    except Exception as exc:
-        logger.exception("realtime_endpoint_unhandled_exception: %s", exc)
+    except Exception:
         await _error_and_close(
             websocket,
             send_json,
             "INTERNAL_SERVER_ERROR",
-            "Realtime transcription could not continue: " + str(exc),
-            True,
+            "Realtime transcription could not continue.",
+            False,
         )
     finally:
         with CancelScope(shield=True):
@@ -446,26 +431,16 @@ async def realtime_transcription(websocket: WebSocket, meeting_id: UUID) -> None
                             )
                     except (STTProviderError, RuntimeError, ValueError):
                         pass
-                if (
-                    transcript_service is not None
-                    and not terminal_failure
-                    and not retryable_interruption
-                ):
-                    try:
-                        await _save_realtime_media()
-                        await transcript_service.recording_ended()
-                    except RuntimeError:
-                        pass
+                # Closing a browser connection is an interruption, not an explicit
+                # request to finish the meeting.  Keep the meeting resumable; only
+                # the recording.stop command (or the complete HTTP endpoint) may
+                # move it to COMPLETED.
             finally:
-                try:
-                    if not pcm_temp_file.closed:
-                        pcm_temp_file.close()
-                except OSError:
-                    pass
-                try:
-                    pcm_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                if audio_writer is not None:
+                    try:
+                        await audio_writer.flush()
+                    except Exception:
+                        logger.exception("realtime_audio_flush_failed")
                 await session_stack.aclose()
 
 
@@ -493,16 +468,10 @@ async def _receive_with_events(
                 (message_task, event_task), return_when=asyncio.FIRST_COMPLETED
             )
             if event_task in done:
-                try:
-                    events = event_task.result()
-                    await _emit_events(
-                        send_json, transcript_service, events,
-                        translation_session=translation_session,
-                    )
-                except STTProviderError:
-                    raise
-                except Exception as emit_err:
-                    logger.warning("realtime_emit_events_failed: %s", emit_err, exc_info=True)
+                await _emit_events(
+                    send_json, transcript_service, event_task.result(),
+                    translation_session=translation_session,
+                )
             if message_task in done:
                 return message_task.result()
     finally:
@@ -541,9 +510,14 @@ def _command(raw_message: str) -> RealtimeCommand | None:
         "recording.pause",
         "recording.resume",
         "recording.stop",
+        "speakers.refresh",
         "translation.disable",
     }:
-        return RealtimeCommand(command_type)
+        new_section = payload.get("new_section", False)
+        acknowledge = payload.get("acknowledge", False)
+        if not isinstance(new_section, bool) or not isinstance(acknowledge, bool):
+            return None
+        return RealtimeCommand(command_type, new_section=new_section, acknowledge=acknowledge)
     if command_type != "translation.enable":
         return None
     target_language = payload.get("target_language")

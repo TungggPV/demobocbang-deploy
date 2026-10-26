@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ApiError
 from app.models.enums import MeetingPermission, MeetingSourceType, MeetingStatus
 from app.models.meeting import Meeting, MeetingMember, ShareLink
+from app.models.meeting_section import MeetingSection
 from app.models.user import User
 from app.schemas.auth import UserResponse
 import time
@@ -76,6 +77,8 @@ class MeetingService:
     async def create(self, owner: User, payload: MeetingCreateRequest) -> MeetingResponse:
         meeting = Meeting(owner_id=owner.id, **payload.model_dump())
         self._session.add(meeting)
+        await self._session.flush()
+        self._session.add(MeetingSection(meeting_id=meeting.id, sequence=1, title="Phiên 1", start_ms=0, is_started=False))
         await self._session.commit()
         invalidate_user_meetings_cache(owner.id)
         await self._session.refresh(meeting)
@@ -172,13 +175,7 @@ class MeetingService:
         if meeting is None:
             raise ApiError("MEETING_NOT_FOUND", "Meeting was not found.", 404)
 
-        now = time.monotonic()
-        cached = _ACCESS_CACHE.get((meeting_id, user.id))
-        if cached is not None and (now - cached[0]) < _ACCESS_CACHE_TTL:
-            permission = cached[1]
-        else:
-            permission = await self.require_meeting_access(meeting, user, required)
-            _ACCESS_CACHE[(meeting_id, user.id)] = (now, permission)
+        permission = await self.require_meeting_access(meeting, user, required)
 
         if _PERMISSION_RANK[permission] < _PERMISSION_RANK[required]:
             raise ApiError("PERMISSION_DENIED", "You do not have permission for this action.", 403)

@@ -206,4 +206,5 @@ export const apiClient = {
   patch: <T>(path: string, body: unknown) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
   getBlob: (path: string) => request<Blob>(path, {}, true, "blob"),
+  postBlob: (path: string, body?: unknown) => request<Blob>(path, { method: "POST", body: body instanceof FormData ? body : JSON.stringify(body) }, true, "blob"),
 };

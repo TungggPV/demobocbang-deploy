@@ -42,6 +42,13 @@ def invalidate_bundle_cache(meeting_id: UUID | None = None) -> None:
 
 register_bundle_invalidator(invalidate_bundle_cache)
 
+from app.schemas.meeting_section import (
+    MeetingSectionResponse,
+    SectionCreateRequest,
+    SectionUpdateRequest,
+)
+from app.services.meeting_sections import MeetingSectionService
+
 router = APIRouter(prefix="/meetings")
 
 
@@ -50,6 +57,29 @@ async def get_meeting_service(session: DatabaseSessionDependency) -> MeetingServ
 
 
 MeetingServiceDependency = Annotated[MeetingService, Depends(get_meeting_service)]
+
+@router.get("/{meeting_id}/sections", response_model=list[MeetingSectionResponse])
+async def list_sections(meeting_id: UUID, user: CurrentUserDependency, session: DatabaseSessionDependency):
+    return await MeetingSectionService(session).list(meeting_id, user)
+
+
+@router.patch("/{meeting_id}/sections/{section_id}", response_model=MeetingSectionResponse)
+async def rename_section(meeting_id: UUID, section_id: UUID, body: SectionUpdateRequest,
+                         user: CurrentUserDependency, session: DatabaseSessionDependency):
+    return await MeetingSectionService(session).update(meeting_id, section_id, user, body)
+
+
+@router.post("/{meeting_id}/sections", response_model=list[MeetingSectionResponse], status_code=201)
+async def create_section(meeting_id: UUID, body: SectionCreateRequest,
+                         user: CurrentUserDependency, session: DatabaseSessionDependency):
+    return await MeetingSectionService(session).create(meeting_id, user, body)
+
+
+@router.delete("/{meeting_id}/sections/{section_id}", response_model=list[MeetingSectionResponse])
+async def delete_section(meeting_id: UUID, section_id: UUID, user: CurrentUserDependency,
+                         session: DatabaseSessionDependency, expected_revision: str = Query(max_length=64)):
+    return await MeetingSectionService(session).delete(meeting_id, section_id, user, expected_revision)
+
 
 
 @router.post("", response_model=MeetingResponse, status_code=status.HTTP_201_CREATED)
@@ -142,9 +172,12 @@ async def update_meeting(
 
 @router.post("/{meeting_id}/complete", response_model=MeetingResponse)
 async def complete_meeting(
-    meeting_id: UUID, user: CurrentUserDependency, service: MeetingServiceDependency
+    meeting_id: UUID, user: CurrentUserDependency, request: Request,
 ) -> MeetingResponse:
-    return await service.complete(meeting_id, user)
+    from app.core.dependencies import get_database
+    from app.services.transcript_polish import complete_with_polish
+    async with get_database(request).session() as session:
+        return await complete_with_polish(session, meeting_id, user, request.app.state)
 
 
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)

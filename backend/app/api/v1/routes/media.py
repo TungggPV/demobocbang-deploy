@@ -8,7 +8,8 @@ from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Request, Response, UploadFile, status
-from fastapi.responses import RedirectResponse, Response as FastAPIResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import Response as FastAPIResponse
 
 from app.api.v1.routes.auth import CurrentUserDependency
 from app.core.config import Settings
@@ -16,8 +17,14 @@ from app.core.dependencies import get_database, get_settings
 from app.core.security import TokenService
 from app.db.session import Database
 from app.providers.storage import MediaStorage
-from app.schemas.media import JobResponse, MediaFileResponse, MediaPlaybackResponse
+from app.schemas.media import (
+    JobResponse,
+    MediaFileResponse,
+    MediaPlaybackResponse,
+    RecordingResponse,
+)
 from app.services.media import MediaService
+from app.services.recording import RecordingService
 from app.workers.lifecycle import fail_enqueue
 
 meetings_router = APIRouter(prefix="/meetings")
@@ -33,6 +40,25 @@ async def get_media_service(request: Request) -> AsyncIterator[MediaService]:
 
 
 MediaServiceDependency = Annotated[MediaService, Depends(get_media_service)]
+
+
+@meetings_router.get("/{meeting_id}/recording", response_model=RecordingResponse)
+async def recording_status(meeting_id: UUID, request: Request, user: CurrentUserDependency) -> RecordingResponse:
+    async with get_database(request).session() as session:
+        return await RecordingService(session).status(meeting_id, user)
+
+
+@meetings_router.post("/{meeting_id}/recording", response_model=RecordingResponse, status_code=202)
+async def prepare_recording(meeting_id: UUID, request: Request, user: CurrentUserDependency) -> RecordingResponse:
+    async with get_database(request).session() as session:
+        service = RecordingService(session)
+        job = await service.prepare(meeting_id, user)
+        if job.status == "queued":
+            try:
+                request.app.state.enqueue_job(job.id, get_settings(request))
+            except Exception:
+                await fail_enqueue(get_database(request), job.id)
+        return await service.status(meeting_id, user)
 
 
 @meetings_router.post(
@@ -85,12 +111,14 @@ async def playback_media(ticket: str, request: Request, service: MediaServiceDep
     _, meeting_id, media_id = tokens.verify_media_playback_ticket(ticket)
     media = await service.media_for_playback_ticket(meeting_id, media_id)
     start, end = _parse_range(request.headers.get("range"), media.size_bytes)
-    content = await service.read_ticket_media_range(media, start, end)
     partial = request.headers.get("range") is not None
-    headers = {"Accept-Ranges": "bytes", "Content-Length": str(len(content)), "Cache-Control": "private, max-age=300"}
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(end - start + 1), "Cache-Control": "private, max-age=300"}
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end}/{media.size_bytes}"
-    return FastAPIResponse(content=content, status_code=status.HTTP_206_PARTIAL_CONTENT if partial else status.HTTP_200_OK, media_type=media.mime_type, headers=headers)
+    async def chunks():
+        for offset in range(start, end + 1, 1024 * 1024):
+            yield await service.read_ticket_media_range(media, offset, min(end, offset + 1024 * 1024 - 1))
+    return StreamingResponse(chunks(), status_code=status.HTTP_206_PARTIAL_CONTENT if partial else status.HTTP_200_OK, media_type=media.mime_type, headers=headers)
 
 
 @meetings_router.get("/{meeting_id}/media/{media_id}/stream")
@@ -118,7 +146,7 @@ async def stream_media(
 
 @meetings_router.get("/{meeting_id}/media/{media_id}/download")
 async def download_media(
-    meeting_id: UUID, media_id: UUID, user: CurrentUserDependency, service: MediaServiceDependency
+    meeting_id: UUID, media_id: UUID, request: Request, user: CurrentUserDependency, service: MediaServiceDependency
 ) -> Response:
     settings = get_settings(request)
     url = await service.presigned_url(
@@ -131,8 +159,11 @@ async def download_media(
     if media_info is None:
         from app.core.errors import ApiError
         raise ApiError("MEDIA_NOT_FOUND", "Media was not found.", 404)
-    content, media = await service.read_media_range(meeting_id, media_id, user, 0, media_info.size_bytes - 1)
-    return FastAPIResponse(content=content, media_type=media.mime_type, headers={"Content-Disposition": f"attachment; filename=media; filename*=UTF-8''{quote(media.original_filename)}", "Accept-Ranges": "bytes"})
+    media = await service.media_for_playback_ticket(meeting_id, media_id)
+    async def chunks():
+        for offset in range(0, media_info.size_bytes, 1024 * 1024):
+            yield await service.read_ticket_media_range(media, offset, min(media_info.size_bytes - 1, offset + 1024 * 1024 - 1))
+    return StreamingResponse(chunks(), media_type=media_info.mime_type, headers={"Content-Disposition": f"attachment; filename=media; filename*=UTF-8''{quote(media_info.original_filename)}", "Accept-Ranges": "bytes", "Content-Length": str(media_info.size_bytes)})
 
 
 @meetings_router.delete("/{meeting_id}/media/{media_id}", status_code=status.HTTP_204_NO_CONTENT)

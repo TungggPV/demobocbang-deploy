@@ -169,8 +169,14 @@ class LLMCapabilities:
 class LLMProvider(Protocol):
     def capabilities(self) -> LLMCapabilities: ...
 
+    async def polish_transcript(self, segments: tuple[str, ...], context: str) -> tuple[str, ...]: ...
+
     async def generate_summary(
-        self, transcript: str, template: str, output_language: str
+        self,
+        transcript: str,
+        prompt: str | None,
+        output_language: str,
+        template: str | None = None,
     ) -> dict[str, object]: ...
 
 

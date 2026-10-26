@@ -15,6 +15,7 @@ from app.providers.contracts import (
     TranslationCapabilities,
     TranslationProviderError,
 )
+from app.providers.transcript_polish import TranscriptPolishMixin
 
 _SUMMARY_KEYS = ("overview", "key_points", "action_items", "decisions", "risks_notes")
 
@@ -49,8 +50,27 @@ class _GroqBase:
         except httpx.HTTPError as exc:
             raise LLMProviderError("Groq could not be reached.", code="GROQ_NETWORK_ERROR", retryable=True) from exc
         if response.is_error:
+            provider_code = None
+            try:
+                payload = response.json()
+                error = payload.get("error", {}) if isinstance(payload, dict) else {}
+                provider_code = error.get("code") if isinstance(error, dict) else None
+            except (TypeError, ValueError):
+                pass
+            if provider_code == "json_validate_failed":
+                raise LLMProviderError(
+                    "Groq could not generate valid structured output.",
+                    code="GROQ_JSON_VALIDATE_FAILED",
+                    retryable=True,
+                )
             retryable = response.status_code == 429 or response.status_code >= 500
-            raise LLMProviderError("Groq rejected the request.", code="GROQ_HTTP_ERROR", retryable=retryable)
+            raise LLMProviderError(
+                "Groq rate limit was reached. Please try again shortly."
+                if response.status_code == 429
+                else "Groq rejected the request.",
+                code="GROQ_RATE_LIMITED" if response.status_code == 429 else "GROQ_HTTP_ERROR",
+                retryable=retryable,
+            )
         try:
             payload = response.json()
             text = payload["choices"][0]["message"]["content"]
@@ -62,31 +82,62 @@ class _GroqBase:
         return result
 
 
-class GroqSummaryProvider(_GroqBase):
+class GroqSummaryProvider(TranscriptPolishMixin, _GroqBase):
     """Generate normalized meeting summaries through Groq."""
 
     def capabilities(self) -> LLMCapabilities:
         return LLMCapabilities(structured_output=True, max_context_tokens=131_072)
 
     async def generate_summary(
-        self, transcript: str, template: str, output_language: str
+        self,
+        transcript: str,
+        user_prompt: str | None,
+        output_language: str,
+        template: str | None = None,
     ) -> dict[str, object]:
-        schema: dict[str, object] = {
-            "type": "object",
-            "properties": {
-                "overview": {"type": "string"},
-                **{key: {"type": "array", "items": {"type": "string"}} for key in _SUMMARY_KEYS[1:]},
-            },
-            "required": list(_SUMMARY_KEYS),
-            "additionalProperties": False,
-        }
         language_name = {"vi": "Vietnamese", "en": "English"}[output_language]
-        prompt = (
-            f"Create a faithful {template} meeting summary from the transcript. Never invent facts. "
-            "For voting, emphasize decisions and votes; for briefing, make actions concise. "
-            f"Write every human-readable value in {language_name}. Keep the JSON property names unchanged. "
-            f"Return JSON only.\n\nTranscript:\n{transcript}"
-        )
+        if template:
+            schema: dict[str, object] = {
+                "type": "object",
+                "properties": {
+                    "overview": {"type": "string"},
+                    **{key: {"type": "array", "items": {"type": "string"}} for key in _SUMMARY_KEYS[1:]},
+                },
+                "required": list(_SUMMARY_KEYS),
+                "additionalProperties": False,
+            }
+            focus = {
+                "general": "Cover the overall discussion and the most important outcomes.",
+                "briefing": "Emphasize concise updates, blockers, owners, and next actions.",
+                "voting": "Emphasize motions, voting results, decisions, and dissenting views.",
+            }.get(template, "Cover the most important meeting outcomes.")
+            prompt = (
+                f"Create a faithful {template} meeting summary. {focus} "
+                "Use only facts present in the transcript and never invent details. "
+                f"Write every human-readable value in {language_name}. Keep the JSON property names unchanged. "
+                f"Return JSON only.\n\nTranscript:\n{transcript}"
+            )
+        else:
+            if not user_prompt:
+                raise LLMProviderError(
+                    "A custom summary prompt is required.", retryable=False
+                )
+            schema = {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                },
+                "required": ["content"],
+                "additionalProperties": False,
+            }
+            prompt = (
+                "Create a faithful meeting summary that follows the user's requested structure and length. "
+                "Place the entire result in the JSON content string. The content may contain plain-text "
+                "headings, paragraphs, numbered lists, or bullet lists when the user asks for them. "
+                "Use only facts present in the transcript and never invent details. "
+                f"Write every human-readable value in {language_name}. Return JSON only. "
+                f"\n\nUser request:\n{user_prompt}\n\nTranscript:\n{transcript}"
+            )
         return await self._generate(prompt, schema)
 
 

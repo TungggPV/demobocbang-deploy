@@ -68,6 +68,7 @@ def test_async_session_persists_versioned_transcript_and_summary() -> None:
             summary_version = SummaryVersion(
                 summary=summary,
                 version_no=1,
+                prompt="Tóm tắt nội dung chính.",
                 content={"overview": "Greeting"},
                 provider="test-provider",
                 model="test-model",

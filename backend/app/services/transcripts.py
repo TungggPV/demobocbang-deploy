@@ -126,6 +126,54 @@ class TranscriptService:
                 raise ApiError("SPEAKER_NOT_FOUND", "Speaker was not found for this meeting.", 404)
         return await self._projected_speaker(logical_id, user, payload.speaker_id)
 
+    async def confirm_voice_identity(
+        self, meeting: Meeting, actor: User, segments: list[CurrentSegment],
+        profile_id: UUID, name: str,
+    ) -> None:
+        """Record human identity confirmation in the caller's atomic learning transaction."""
+        transcript = await self._transcript_for_meeting(meeting.id)
+        speaker = await self._session.get(Speaker, segments[0].speaker_id) if segments[0].speaker_id else None
+        if speaker is None:
+            speaker = Speaker(meeting_id=meeting.id, name=name, is_identified=False)
+            self._session.add(speaker)
+            await self._session.flush()
+        speaker.name, speaker.voice_profile_id = name, profile_id
+        speaker.is_identified = False  # Human-confirmed, not an AI match/confidence score.
+        speaker.match_confidence = None
+        version = await self._new_user_version(meeting, transcript, actor)
+        for order, item in enumerate(segments, 1):
+            item.speaker_id = speaker.id
+            self._session.add(TranscriptEditEvent(
+                transcript_id=transcript.id, version_id=version.id, actor_id=actor.id,
+                event_order=order, event_type="speaker_assigned", payload={
+                    "logical_segment_id": str(item.logical_segment_id),
+                    "speaker_id": str(speaker.id), "source": "user", "voice_learning": True,
+                },
+            ))
+        meeting.current_transcript_version_id = version.id
+        await self._session.flush()
+
+    async def accept_polished_text(
+        self, meeting: Meeting, transcript: Transcript, segments: list[CurrentSegment],
+        actor: User, texts: dict[str, str], proposal_id: UUID,
+    ) -> TranscriptVersion:
+        """Caller holds segment/meeting locks and commits proposal + revision atomically."""
+        self._require_projection(transcript)
+        version = await self._new_user_version(meeting, transcript, actor)
+        for order, row in enumerate(segments, 1):
+            row.text = texts[str(row.logical_segment_id)]
+            self._session.add(TranscriptEditEvent(
+                transcript_id=transcript.id, version_id=version.id, actor_id=actor.id,
+                event_order=order, event_type="segment_edited", payload={
+                    "logical_segment_id": str(row.logical_segment_id), "text": row.text,
+                    "source": "user", "polish_proposal_id": str(proposal_id),
+                },
+            ))
+        meeting.current_transcript_version_id = version.id
+        await self._session.flush()
+        await self._checkpoint(transcript, version)
+        return version
+
     async def merge_segments(
         self, payload: SegmentMergeRequest, user: User
     ) -> TranscriptMutationResponse:

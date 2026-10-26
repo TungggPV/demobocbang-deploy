@@ -1,6 +1,35 @@
 import { config } from "../app/config";
 import { apiClient } from "./client";
-import type { AuthSession, Capabilities, Comment, CreatedShareLink, ExportArtifact, ExportFormat, Job, Meeting, MeetingBundle, MeetingStatus, MediaFile, Permission, Segment, ShareLink, Speaker, SpeakerSample, Summary, SummaryLanguage, SummaryTemplate, Transcript, Translation, User, VoiceProfile } from "../types/domain";
+import type {
+  AuthSession,
+  Capabilities,
+  Comment,
+  CreatedShareLink,
+  ExportArtifact,
+  ExportFormat,
+  Job,
+  Meeting,
+  MeetingBundle,
+  MeetingRecording,
+  MeetingSection,
+  MeetingStatus,
+  MediaFile,
+  Permission,
+  Segment,
+  ShareLink,
+  Speaker,
+  SpeakerSample,
+  Summary,
+  SummaryLanguage,
+  SummaryMode,
+  SummaryScope,
+  SummaryTemplate,
+  Transcript,
+  TranscriptPolish,
+  Translation,
+  User,
+  VoiceProfile,
+} from "../types/domain";
 
 type Page = { limit?: number; offset?: number; q?: string; status?: MeetingStatus; source_type?: Meeting["source_type"] };
 export type TranscriptMutation = { version_id: string; version_no: number; segment?: Segment };
@@ -36,6 +65,12 @@ let listCache: { key: string; data: Meeting[]; timestamp: number } | null = null
 const LIST_CACHE_TTL = 15_000;
 
 export const meetingsApi = {
+  sections: (id: string) => apiClient.get<MeetingSection[]>(`/meetings/${id}/sections`),
+  renameSection: (meetingId: string, sectionId: string, title: string) => apiClient.patch<MeetingSection>(`/meetings/${meetingId}/sections/${sectionId}`, { title }),
+  updateSection: (meetingId: string, sectionId: string, body: { title: string; start_ms: number; end_ms: number | null; expected_revision: string }) => apiClient.patch<MeetingSection>(`/meetings/${meetingId}/sections/${sectionId}`, body),
+  createSection: (meetingId: string, body: { title: string; start_ms: number; expected_revision: string }) => apiClient.post<MeetingSection[]>(`/meetings/${meetingId}/sections`, body),
+  deleteSection: (meetingId: string, sectionId: string, revision: string) => apiClient.delete<MeetingSection[]>(`/meetings/${meetingId}/sections/${sectionId}?expected_revision=${encodeURIComponent(revision)}`),
+  editSummary: (id: string, content: Record<string, unknown>, expected_version_no?: number) => apiClient.patch<Summary>(`/summaries/${id}`, { content, expected_version_no }),
   invalidateBundle: (id?: string) => {
     if (id) bundleCache.delete(id);
     else bundleCache.clear();
@@ -135,7 +170,16 @@ export const meetingsApi = {
   addMember: (meetingId: string, email: string, permission: Exclude<Permission, "owner">, attachments: Array<"audio" | "transcript" | "summary" | "translation"> = []) => apiClient.post<void>(`/meetings/${meetingId}/members`, { email, permission, attachments }),
   translation: (id: string, source_language: string, target_language: string) => apiClient.post<Job>(`/meetings/${id}/translations`, { source_language, target_language }),
   translations: (id: string) => apiClient.get<Translation[]>(`/meetings/${id}/translations`),
-  summary: (id: string, template: SummaryTemplate, output_language: SummaryLanguage) => apiClient.post<Job>(`/meetings/${id}/summaries`, { template, output_language }),
+  summary: (
+    id: string,
+    param: SummaryTemplate | { scope?: SummaryScope; section_ids?: string[]; sections_revision?: string; mode?: SummaryMode; template?: SummaryTemplate; prompt?: string; output_language: SummaryLanguage },
+    output_language?: SummaryLanguage
+  ) => {
+    if (typeof param === "string") {
+      return apiClient.post<Job>(`/meetings/${id}/summaries`, { template: param, output_language });
+    }
+    return apiClient.post<Job>(`/meetings/${id}/summaries`, { mode: param.mode || (param.prompt ? "custom" : "template"), ...param });
+  },
   summaries: (id: string) => apiClient.get<Summary[]>(`/meetings/${id}/summaries`),
   comments: (id: string, page?: Page) => apiClient.get<Comment[]>(`/meetings/${id}/comments${pageQuery(page)}`),
   addComment: (id: string, body: string, segment_logical_id?: string) => apiClient.post<Comment>(`/meetings/${id}/comments`, { body, segment_logical_id }),
@@ -162,6 +206,25 @@ export const capabilitiesApi = {
   },
 };
 export const jobsApi = { get: (id: string) => apiClient.get<Job>(`/jobs/${id}`) };
+export const recordingApi = {
+  latest: (id: string, signal?: AbortSignal) => apiClient.get<MeetingRecording>(`/meetings/${id}/recording`, { signal }),
+  prepare: (id: string) => apiClient.post<MeetingRecording>(`/meetings/${id}/recording`),
+  download: (meetingId: string, mediaId: string) => apiClient.getBlob(`/meetings/${meetingId}/media/${mediaId}/download`),
+};
+
+export const transcriptPolishApi = {
+  latest: (id: string, signal?: AbortSignal) => apiClient.get<TranscriptPolish | null>(`/meetings/${id}/transcript/polish`, { signal }),
+  create: (id: string) => apiClient.post<TranscriptPolish>(`/meetings/${id}/transcript/polish`),
+  review: (id: string, jobId: string, body: { revision: number; segments: Array<{ logical_segment_id: string; text: string }> }, accept: boolean) => accept
+    ? apiClient.post<TranscriptPolish>(`/meetings/${id}/transcript/polish/${jobId}/accept`, body)
+    : apiClient.patch<TranscriptPolish>(`/meetings/${id}/transcript/polish/${jobId}`, body),
+};
+
+export const voiceLearningApi = {
+  preview: (meetingId: string, segment_ids: string[]) => apiClient.postBlob(`/meetings/${meetingId}/voice-learning/preview`, { segment_ids }),
+  learn: (meetingId: string, body: { segment_ids: string[]; name: string; profile_id?: string }) => apiClient.post<Job>(`/meetings/${meetingId}/voice-learning`, body),
+};
+
 export const sharesApi = {
   resolve: (token: string) => apiClient.get<{ meeting: Meeting; permission: Exclude<Permission, "owner"> }>(`/shares/${token}`),
   transcript: (token: string) => apiClient.get<{ meeting: Meeting; permission: Exclude<Permission, "owner">; transcript: Transcript }>(`/shares/${token}/transcript`),

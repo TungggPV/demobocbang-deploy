@@ -14,6 +14,7 @@ from app.models.transcript import CurrentSegment, Transcript
 from app.models.user import User
 from app.providers.contracts import TranscriptionSegment
 from app.schemas.transcript import TranscriptMutationResponse
+from app.services.meeting_sections import MeetingSectionService
 from app.services.transcripts import TranscriptService
 
 
@@ -56,6 +57,7 @@ class RealtimeTranscriptService:
 
     async def recording_started(self) -> None:
         meeting = await self._ensure_meeting()
+        await MeetingSectionService(self._session).begin(meeting)
         if meeting.status in {
             MeetingStatus.CREATED,
             MeetingStatus.PROCESSING,

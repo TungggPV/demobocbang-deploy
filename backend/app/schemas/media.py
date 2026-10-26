@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,3 +45,11 @@ class JobResponse(BaseModel):
     error: JobErrorResponse | None
     created_at: datetime
     updated_at: datetime
+
+
+class RecordingResponse(BaseModel):
+    status: Literal["not_completed", "unavailable", "pending", "ready", "failed", "deleted"]
+    media: MediaFileResponse | None = None
+    job: JobResponse | None = None
+    can_prepare: bool = False
+    warning: str | None = None

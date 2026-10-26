@@ -106,7 +106,7 @@ export function SummaryPage({ meetingId }: { meetingId: string }) {
     {summary ? <div className="summary-layout">
       <section className="summary-document">
         <div className="summary-document-meta">
-          <Status>{labels[summary.template]}</Status>
+          <Status>{summary.template ? labels[summary.template] : "Tùy chỉnh"}</Status>
           <span>{languageLabels[summary.output_language]} · v{summary.current_version.version_no} · {new Date(summary.current_version.created_at).toLocaleString("vi-VN")}</span>
         </div>
         {Object.entries(summary.current_version.content).map(([key, value], index) => <article className="summary-section" key={key}>

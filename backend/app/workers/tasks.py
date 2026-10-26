@@ -10,11 +10,13 @@ import dramatiq
 from app.core.config import get_settings
 from app.db.session import Database
 from app.providers.llm import build_llm_provider
-from app.providers.stt import build_stt_provider
 from app.providers.storage import build_storage_backend
+from app.providers.stt import build_speaker_enrollment_provider, build_stt_provider
 from app.providers.translation import build_translation_provider
 from app.services.ai import AIJobDispatcher
 from app.services.media_worker import MediaProcessingWorker
+from app.services.recording import RecordingWorker
+from app.services.voice_learning import VoiceLearningWorker
 
 
 @dramatiq.actor
@@ -30,6 +32,17 @@ async def _execute(job_id: UUID) -> bool:
     database = Database(settings.database_url)
     try:
         storage = build_storage_backend(settings)
+        async with database.session() as session:
+            from app.models.media import Job
+            job = await session.get(Job, job_id)
+            is_voice_learning = bool(job and job.job_type == "voice_learning")
+            is_recording = bool(job and job.job_type == "recording_assembly")
+        if is_recording:
+            return await RecordingWorker(database, storage, settings).run(job_id)
+        if is_voice_learning:
+            return await VoiceLearningWorker(
+                database, storage, build_speaker_enrollment_provider(settings), settings,
+            ).run(job_id)
         media = MediaProcessingWorker(database, storage, build_stt_provider(settings), settings)
         ai = AIJobDispatcher(
             database,
