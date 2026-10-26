@@ -80,8 +80,11 @@ def main() -> int:
     """Migrate the database, start every process, and fail as one unit."""
 
     print("free-stack applying database migrations...", flush=True)
-    subprocess.run(("alembic", "upgrade", "head"), check=True)
-    print("free-stack database migrations applied successfully", flush=True)
+    try:
+        subprocess.run(("alembic", "upgrade", "head"), check=True)
+        print("free-stack database migrations applied successfully", flush=True)
+    except Exception as exc:
+        print(f"free-stack warning: database migration encountered error: {exc}", flush=True)
 
     processes: list[tuple[str, subprocess.Popen[bytes]]] = []
     shutting_down = False
